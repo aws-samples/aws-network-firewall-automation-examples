@@ -1,0 +1,198 @@
+Parameters:
+  AbuseJA3RG1Name:
+    Description: "The name of the first Rule Group created to hold the rules"
+    Type: String
+    Default: 'AutoUpdating-AbuseCH-JA3'
+  AbuseRuleGroupAction:
+    Type: String
+    Description: "Used to define the action to take on a matching rule if found"
+    Default : 'drop'
+    AllowedValues:
+      - 'alert'
+      - 'drop'
+  
+Resources:
+  AbuseRG1:
+    Type: 'AWS::NetworkFirewall::RuleGroup'
+    Properties:
+      RuleGroupName: !Sub "${AWS::StackName}-${AbuseJA3RG1Name}-${AbuseRuleGroupAction}"
+      Type: STATEFUL
+      RuleGroup:
+        RulesSource:
+          RulesString: '#This will be updated via the Lambda function'
+      Capacity: 500
+      Description: >-
+        Used to track a list of Suricata rules from https://sslbl.abuse.ch/blacklist/ja3_fingerprints.rules. It is updated daily by the CloudWatch Event: AbuseCHJA3DailyTrigger.
+      Tags: 
+        - 
+          Key: "ProjectName"
+          Value: "AbuseCHJA3Filtering"
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: LambdaLogs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+      - PolicyName: NetworkFirewall
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'network-firewall:*'
+            Resource: 
+              - !GetAtt AbuseRG1.RuleGroupArn
+      Tags: 
+          - 
+            Key: "ProjectName"
+            Value: "AbuseCHJA3Filtering"
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+    DeletionPolicy: Retain
+  ScheduledRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "AbuseCHJA3DailyTrigger"
+      ScheduleExpression: "cron(0 0 * * ? *)"
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - "LambdaFunction"
+              - "Arn"
+          Id: "TargetFunctionV1"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "LambdaFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "ScheduledRule"
+          - "Arn"
+  LambdaInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: nodejs12.x
+      Handler: index.handler
+      Timeout: 60
+      Description: Used to fetch data from the abuse.ch rule list and update the associated RuleGroup
+      Tags: 
+        - 
+          Key: "ProjectName"
+          Value: "AbuseCHJA3Filtering"
+      Code:
+        ZipFile: !Sub |
+          var AWS = require("aws-sdk");
+          var response = require('cfn-response');
+          var https = require("https");
+          var listOfRules = [];
+
+          const url = "https://sslbl.abuse.ch/blacklist/ja3_fingerprints.rules";
+
+          const networkfirewall = new AWS.NetworkFirewall();
+
+          function fetchRules() {
+            console.log("Fetching the list of rules...");
+            return new Promise((resolve, reject) => {
+              let dataString = '';
+              let post_req = https.request(url, (res) => {
+                res.setEncoding("utf8");
+                res.on('data', chunk => {
+                  dataString += chunk;
+                });
+                res.on('end', () => {
+                  listOfRules = dataString.split(/\r?\n/);
+                  console.log("Fetched rules...");
+                  resolve();
+                });
+                res.on('error', (err) => {
+                  reject(err);
+                });
+              });
+              post_req.end();
+            });
+          }
+
+          let updateRules = async function (ruleGroup,newRules) {
+            let params = ruleGroup;
+            params.RuleGroupName = params.RuleGroupResponse.RuleGroupName;
+            params.Description = params.RuleGroupResponse.Description;
+            params.Type = params.RuleGroupResponse.Type;
+            delete params.RuleGroupResponse;
+            delete params.Capacity;
+            let rulesString = "# Last autofetched by Lambda: " + new Date().toUTCString() + "\n";
+            rulesString += newRules.join("\n");
+            params.RuleGroup.RulesSource.RulesString = rulesString;
+
+            console.log("Updating rules...");
+            let res = await networkfirewall.updateRuleGroup(params).promise();
+            if (res) {
+              console.log("Updated '" + params.RuleGroupName + "'.");
+            } else {
+              console.log("Error updating the rules for '" + params.RuleGroupName + "'...");
+            }
+            return;
+          };
+
+          let createRules = async function (action) {
+            if (listOfRules.length == 0) {
+              await fetchRules();
+            } else {
+              console.log("Using recently fetched list of rules...");
+            }
+
+            if (action == 'drop') listOfRules = listOfRules.map(rule => rule.replace("alert ", "drop ").replace(" detected", " dropped"));
+
+            return;
+          };
+
+          exports.handler = async (event, context) => {
+            if (event.RequestType == "Delete") {
+              await response.send(event, context, "SUCCESS");
+              return;
+            }
+
+            var rg1 = {Type: "STATEFUL", RuleGroupArn: '${AbuseRG1.RuleGroupArn}'};
+            
+            await createRules('${AbuseRuleGroupAction}');
+            
+            console.log("Searching Rule Groups for " + rg1.RuleGroupArn + "...");
+            res = await networkfirewall.describeRuleGroup(rg1).promise();
+            if (res.RuleGroupResponse) {
+              console.log("Found matching Rule Group...");
+              await updateRules(res,listOfRules);
+              if (event.ResponseURL) await response.send(event, context, response.SUCCESS);
+            } else {
+              console.log("ERROR: No matching Rule Group found...");
+              if (event.ResponseURL) await response.send(event, context, response.FAILED);
+            }
+            return;
+          };

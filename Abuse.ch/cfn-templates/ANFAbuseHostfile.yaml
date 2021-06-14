@@ -1,0 +1,194 @@
+Parameters:
+  RGName:
+    Type: String
+    Default: "AbuseCH-Hostfile-DomainList"
+  
+Resources:
+  SNIRuleGroup:
+    Type: 'AWS::NetworkFirewall::RuleGroup'
+    Properties:
+      RuleGroupName: !Sub "${RGName}-${AWS::StackName}"
+      Type: STATEFUL
+      RuleGroup:
+        RulesSource:
+          RulesSourceList:
+            GeneratedRulesType: DENYLIST
+            Targets: 
+              - www.this-domain-will-be-updated-by-lambda.com
+            TargetTypes: 
+              - TLS_SNI
+              - HTTP_HOST
+      Capacity: 5000
+      Description: !Sub ' -- The CloudWatch Events Rule: AbuseCHHostfileRulegroupHourlyTrigger, triggers a daily update of this list.'
+      Tags: 
+        - Key: "ProjectName"
+          Value: "AbuseCH-HostfileDomainList"
+        - Key: "downloaded-from"
+          Value: "https://urlhaus.abuse.ch/downloads/hostfile/"
+        - Key: "description"
+          Value: "abuse.ch URLhaus Host file"
+        - Key: "terms-of-use"
+          Value: "https://urlhaus.abuse.ch/api/"
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: LambdaLogs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
+      - PolicyName: NetworkFirewall
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'network-firewall:*'
+            Resource: 
+              - !GetAtt SNIRuleGroup.RuleGroupArn
+      Tags: 
+          - Key: "ProjectName"
+            Value: "AbuseCH-HostfileDomainList"
+  ScheduledRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "AbuseCHHostfileRulegroupHourlyTrigger"
+      ScheduleExpression: "cron(0 0 * * ? *)"
+      State: "ENABLED"
+      Targets: 
+        - Arn: 
+            Fn::GetAtt: 
+              - "LambdaFunction"
+              - "Arn"
+          Id: "TargetFunctionV1"
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+    DeletionPolicy: Retain
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref "LambdaFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "ScheduledRule"
+          - "Arn"
+  LambdaInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt LambdaFunction.Arn
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: nodejs12.x
+      Handler: index.handler
+      Timeout: 60
+      Description: Used to download the hostfile list from Abuse.ch daily
+      Tags: 
+        - 
+          Key: "ProjectName"
+          Value: "AbuseCH-HostfileDomainList"
+      Code:
+        ZipFile: !Sub |
+          var AWS = require("aws-sdk");
+          var response = require('cfn-response');
+          const https = require("https");
+
+          const hostfileUrl = "https://urlhaus.abuse.ch/downloads/hostfile/";
+
+          const nf = new AWS.NetworkFirewall();
+
+          async function getDomains (){
+            var listOfDomains = [];
+              console.log("Fetching the list of domains from " + hostfileUrl);
+              return new Promise((resolve, reject) => {
+                let dataString = '';
+                let post_req = https.request(hostfileUrl, (res) => {
+                  res.setEncoding("utf8");
+                  res.on('data', chunk => {
+                    dataString += chunk;
+                  });
+                  res.on('end', () => {
+                    //console.log(dataString);
+                    listOfDomains = dataString
+                      .split(/\r?\n/)
+                      .filter((line) => line.match(/^\d+/))
+                      .map((line)=> {return line.replace(/127.0.0.1\t/,'').toLowerCase()})
+                      .filter((line) => line.match(/^(?!:\/\/)(?=.{1,255}$)((.{1,63}\.){1,127}(?![0-9]*$)[a-z0-9-]+\.?)$/));
+                    console.log("Fetched " + listOfDomains.length + " Domains");
+                    resolve(listOfDomains);
+                  });
+                  res.on('error', (err) => {
+                    reject(err);
+                  });
+                });
+                post_req.end();
+              });
+          }
+
+          async function updateRuleGroup(arn, domains){
+            let params = {Type: "STATEFUL", RuleGroupArn: arn};
+            let res = await nf.describeRuleGroup(params).promise();
+            if (res.RuleGroupResponse) {
+              console.log("Found destination rulegroup");
+              res.RuleGroup.RulesSource.RulesSourceList.Targets = domains;
+              res.RuleGroupName = res.RuleGroupResponse.RuleGroupName;
+              res.Description = "Last updated: " + new Date().toUTCString() + " -- The CloudWatch Events Rule: AbuseCHHostfileRulegroupHourlyTrigger, triggers a daily update of this list.";
+              res.Type = res.RuleGroupResponse.Type;
+              delete res.Capacity;
+              delete res.RuleGroupResponse;
+
+              console.log("Updating rules");
+              let result = await nf.updateRuleGroup(res).promise();
+              if (result) {
+                console.log("Updated '" + res.RuleGroupName);
+              } else {
+                console.log("Error updating '" + res.RuleGroupName + "'...");
+              }
+            } else {
+              console.log("No matching Rule Group found");
+            } 
+            return;
+          }
+
+          exports.handler = async (event, context) => {
+            if (event.RequestType == "Delete") {
+                await response.send(event, context, "SUCCESS");
+                return;
+            }
+
+            let sourceArn = '${SNIRuleGroup.RuleGroupArn}';
+            let domains = await getDomains(sourceArn);
+            
+            if (domains) {
+              console.log("Using a list of: " + domains.length + " domains");
+              
+              await updateRuleGroup(sourceArn, domains);
+              if (event.ResponseURL) await response.send(event, context, "SUCCESS");
+            } else {
+              console.log("Error fetching a list of domains from: ", sourceArn);
+              if (event.ResponseURL) await response.send(event, context, "FAILED");
+            }
+            
+            return;
+          };
