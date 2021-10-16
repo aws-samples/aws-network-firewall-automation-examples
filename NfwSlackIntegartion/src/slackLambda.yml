@@ -1,0 +1,228 @@
+# (c) 2021 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
+# This AWS Content is provided subject to the terms of the AWS Customer
+# Agreement available at https://aws.amazon.com/agreement/ or other written
+# agreement between Customer and Amazon Web Services, Inc.
+# Author : vramaam@amazon.com
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Configures NFW alerts, creates S3 to store alerts, configure lambda events on s3, creates lambda function to push alerts to slack channel .
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: Slack Integration Configuration
+        Parameters:
+          - pNFWArn
+          # - pSlackSecretArn
+          - pAWSSecretName4Slack
+          - pSlackChannelName
+          - pSlackUserName  
+          - pSecretKey
+          - pWebHookUrl
+          - plambdaSrcS3
+          - plambdaSrcS3Prefix
+          - pAlertS3Bucket     
+          - pSecretTagName
+          - pSecretTagValue
+          - pdestCidr
+          - pdestCondition
+          - psrcCidr
+          - psrcCondition
+Parameters:
+  pNFWArn:
+    Type: String
+    Default: "AWS Network firewall arn"
+  # pSlackSecretArn:
+  #   Type: String
+  #   Default: ""
+  pAWSSecretName4Slack:
+    Type: String
+    Default: "SlackEndpointUrl"  
+  pSlackChannelName:
+    Type: String
+    Default: iosengard-notifications
+  pSlackUserName:
+    Type: String
+    Default: 'Venki Ram'    
+  pSecretKey:
+    Type: String
+    Default: webhookUrl
+  pWebHookUrl:
+    Type: String
+    Default: "https://hooks.slack.com/services/abcd/EFGHH/9FkfhkfjhfjhV5NfN9N7WQeD"
+  pSecretTagName:
+    Type: String
+    Default: AppName
+  pSecretTagValue:
+    Type: String
+    Default: LambdaSlackIntegration    
+  plambdaSrcS3:
+    Type: String
+    Default: venki-lambda-functions
+  plambdaSrcS3Prefix: 
+    Type: String
+    Default: lambda-source
+  pAlertS3Bucket:
+    Type: String
+  pdestCidr:
+    Type: String
+    Default: Destination Cider range filter to alert
+  pdestCondition:
+    Type: String
+    AllowedValues: [include, exclude]
+    Default: include  
+  psrcCidr:
+    Type: String
+    Default: Source Cider range filter to alert  
+  psrcCondition:
+    Type: String
+    AllowedValues: [include, exclude]
+    Default: include  
+Resources:
+  rSlackSecret:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Ref pAWSSecretName4Slack
+      Description: To store slack endpoint url with access token.
+      SecretString: !Join
+                      - ''
+                      - - '{"'
+                        - !Sub ${pSecretKey}
+                        - '":"'
+                        - !Sub ${pWebHookUrl}    
+                        - '"}'
+      Tags:
+        -
+          Key: !Sub ${pSecretTagName}
+          Value: !Sub ${pSecretTagValue}
+  rLambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: /
+      RoleName: !Sub "${AWS::Region}-SlackIntegrationLambdaExecutionRole"
+      Policies:
+        - PolicyName: cloudwatchlogswrite-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: "*"
+              Effect: Allow 
+        - PolicyName: sectretManager-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Action: "secretsmanager:*"
+              Resource: !Ref rSlackSecret
+              Effect: Allow 
+        - PolicyName: s3-bucket-access-policy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Action: "s3:*"
+              Resource:
+                - !Sub "arn:aws:s3:::${pAlertS3Bucket}"
+                - !Sub "arn:aws:s3:::${pAlertS3Bucket}/*"
+              Effect: Allow 
+  rSlackIntegrationLambda:
+    Type: 'AWS::Lambda::Function'
+    DependsOn:
+      - rLambdaExecutionRole
+    Properties:
+      FunctionName: SlackIntegration
+      Handler: "slack-lambda.lambda_handler"
+      Role:
+        'Fn::GetAtt':
+          - rLambdaExecutionRole
+          - Arn
+      Code:
+        S3Bucket: !Ref plambdaSrcS3
+        S3Key: !Sub ${plambdaSrcS3Prefix}/slack-lambda.py.zip
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 300
+      Environment:
+        Variables:
+          slackChannel: !Ref pSlackChannelName
+          slackUser: !Ref pSlackUserName
+          secretArn: !Ref rSlackSecret
+          slackSecretName: !Ref pAWSSecretName4Slack
+          secretRegion: !Sub "${AWS::Region}"
+          destCidr: !Ref pdestCidr
+          destCondition: !Ref pdestCondition
+          srcCidr: !Ref psrcCidr
+          srcCondition: !Ref psrcCondition
+  rLambdaPermission:
+    Type: AWS::Lambda::Permission
+    DependsOn: rSlackIntegrationLambda
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref rSlackIntegrationLambda
+      Principal: s3.amazonaws.com 
+      SourceArn: !Sub "arn:aws:s3:::${pAlertS3Bucket}"
+      SourceAccount: !Ref 'AWS::AccountId'
+  rNfwAlertBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: rLambdaPermission
+    Properties:
+      BucketName: !Ref pAlertS3Bucket
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: 's3:ObjectCreated:Put'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: gz
+            Function: !GetAtt [ rSlackIntegrationLambda, Arn]
+  rNfwAlertBucketPolicy:
+    DependsOn:
+      - rNfwAlertBucket
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref rNfwAlertBucket
+      PolicyDocument:
+        Statement:
+          - Action: 's3:PutObject'
+            Condition:
+              StringEquals: 
+                s3:x-amz-acl: bucket-owner-full-control
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${pAlertS3Bucket}/*'
+            Sid: AWSLogDeliveryWrite
+          - Action: 's3:GetBucketAcl'
+            Effect: Allow
+            Principal:
+              Service: delivery.logs.amazonaws.com
+            Resource: !Sub 'arn:${AWS::Partition}:s3:::${pAlertS3Bucket}'
+            Sid: AWSLogDeliveryAclCheck
+  rNFWLoggingConfiguration:
+    DependsOn:
+      - rNfwAlertBucketPolicy
+    Type: 'AWS::NetworkFirewall::LoggingConfiguration'
+    Properties:
+      FirewallArn: !Ref pNFWArn
+      LoggingConfiguration:
+        LogDestinationConfigs:
+          - LogType: ALERT
+            LogDestinationType: S3
+            LogDestination:
+              bucketName: !Ref pAlertS3Bucket 
+              prefix: nfwAlerts
+Outputs:
+  oAlertBucket:
+    Value: !Ref rNfwAlertBucket
+    Export:
+      Name: AlertBucket

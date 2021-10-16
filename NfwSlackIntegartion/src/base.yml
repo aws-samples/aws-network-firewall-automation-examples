@@ -1,0 +1,218 @@
+# (c) 2021 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
+# This AWS Content is provided subject to the terms of the AWS Customer
+# Agreement available at https://aws.amazon.com/agreement/ or other written
+# agreement between Customer and Amazon Web Services, Inc.
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Launches a nested stack that creates the decentralized deployment model-1
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: VPC Configuration
+        Parameters:
+          - pVpcName
+          - pVpcCidr
+          - pVpcInstanceTenancy
+          - pAvailabilityZone1
+          - pAvailabilityZone2
+          - pNetworkFirewallSubnet1Cidr
+          - pNetworkFirewallSubnet2Cidr
+          - pProtectedSubnet1Cidr
+          - pProtectedSubnet2Cidr
+          - pS3BucketName
+          - pS3KeyPrefix
+      - Label:
+          default: NFW-Slack Integration Configuration
+        Parameters:
+          # - pNFWArn
+          # - pSlackSecretArn
+          - pAWSSecretName4Slack
+          - pSlackChannelName
+          - pSlackUserName  
+          # - pSecretName 
+          - pSecretKey
+          - pWebHookUrl
+          - plambdaSrcS3
+          - pAlertS3Bucket     
+          - pSecretTagName
+          - pSecretTagValue
+          - pdestCidr
+          - pdestCondition
+          - psrcCidr
+          - psrcCondition
+
+Parameters:
+  pVpcName:
+    Type: String
+    Default: Inspection
+  pVpcCidr:
+    Type: String
+    Default: 10.10.0.0/16
+  pVpcInstanceTenancy:
+    Type: String
+    AllowedValues: [default, dedicated]
+    Default: default
+  pAvailabilityZone1:
+    Type: String
+    Default: us-east-2a
+  pAvailabilityZone2:
+    Type: String
+    Default: us-east-2b
+  pNetworkFirewallSubnet1Cidr:
+    Type: String
+    Default: 10.10.1.0/24
+  pNetworkFirewallSubnet2Cidr:
+    Type: String
+    Default: 10.10.2.0/24
+  pProtectedSubnet1Cidr:
+    Type: String
+    Default: 10.10.3.0/24
+  pProtectedSubnet2Cidr:
+    Type: String
+    Default: 10.10.4.0/24
+  pS3BucketName:
+    Type: String
+    Default: bucket-where-source-is - us-w2-yourname-lambda-functions
+  pS3KeyPrefix:
+    Type: String
+    Default: aod-test
+# Parameters for Slack integration
+  # pNFWArn:
+  #   Type: String
+  #   Default: "AWS Network firewall arn"
+  # pSlackSecretArn:
+  #   Type: String
+  #   Default: "ar1"
+  pAWSSecretName4Slack:
+    Type: String
+    Default: "SlackEnpoint-Cfn"  
+  pSlackChannelName:
+    Type: String
+    Default: somename-notifications
+  pSlackUserName:
+    Type: String
+    Default: 'Slack User'    
+  # pSecretName:
+  #   Type: String
+  #   Default: 'SlackEnpoint-Cfn'   
+  pSecretKey:
+    Type: String
+    Default: webhookUrl
+  pWebHookUrl:
+    Type: String
+    Default: "https://hooks.slack.com/services/2T21BH0T59T/499BB02N1J1/Tokenvaluegdjdjdjkdk"
+  pSecretTagName:
+    Type: String
+    Default: AppName
+  pSecretTagValue:
+    Type: String
+    Default: LambdaSlackIntegration    
+  plambdaSrcS3:
+    Type: String
+    Default: bucket-where-source-is - us-w2-yourname-lambda-functions
+  pAlertS3Bucket:
+    Type: String
+    Default: unique-bucket-name-please - us-w2-yourname-security-aod-alerts
+  pdestCidr:
+    Type: String
+    Default: Destination Cider range filter to alert
+  pdestCondition:
+    Type: String
+    AllowedValues: [include, exclude]
+    Default: include  
+  psrcCidr:
+    Type: String
+    Default: Source Cider range filter to alert  
+  psrcCondition:
+    Type: String
+    AllowedValues: [include, exclude]
+    Default: include  
+Conditions:
+  cIsGovCloud:
+    !Or [
+    !Equals [!Ref AWS::Region, us-gov-west-1],
+    !Equals [!Ref AWS::Region, us-gov-east-1],
+    ]
+
+Resources:
+  rFireWall: # Creates output for Listener ARN
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - https://${pS3BucketName}.${s3Region}.amazonaws.com/${pS3KeyPrefix}/${templateName}
+        - s3Region: !If [cIsGovCloud, !Sub "s3-${AWS::Region}", s3]
+          templateName: decentralized-deployment.yml
+      Parameters:
+        pVpcName: !Ref pVpcName
+        pVpcCidr: !Ref pVpcCidr
+        pVpcInstanceTenancy: !Ref pVpcInstanceTenancy
+        pNetworkFirewallSubnetAz1: !Ref pAvailabilityZone1
+        pNetworkFirewallSubnet1Cidr: !Ref pNetworkFirewallSubnet1Cidr
+        pNetworkFirewallSubnetAz2: !Ref pAvailabilityZone2
+        pNetworkFirewallSubnet2Cidr: !Ref pNetworkFirewallSubnet2Cidr
+        pProtectedSubnetAz1: !Ref pAvailabilityZone1
+        pProtectedSubnet1Cidr: !Ref pProtectedSubnet1Cidr
+        pProtectedSubnetAz2: !Ref pAvailabilityZone2
+        pProtectedSubnet2Cidr: !Ref pProtectedSubnet2Cidr
+
+  rProtectedRoute: # adding an extra layer to pass Listener ARN as parameter
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - https://${pS3BucketName}.${s3Region}.amazonaws.com/${pS3KeyPrefix}/${templateName}
+        - s3Region: !If [cIsGovCloud, !Sub "s3-${AWS::Region}", s3]
+          templateName: protected-subnet-route.yml
+      Parameters:
+        pNetworkFirewallSubnetAz1: !Ref pAvailabilityZone1
+        pNetworkFirewallSubnetAz2: !Ref pAvailabilityZone2
+        pVpcEndpoints: !GetAtt rFireWall.Outputs.oNetworkFirewallEndpoint
+        ProtectedSubnetRouteTable1: !GetAtt rFireWall.Outputs.oProtectedSubnetRt1Id
+        ProtectedSubnetRouteTable2: !GetAtt rFireWall.Outputs.oProtectedSubnetRt2Id
+
+  rInternetGatewayRouteTable:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - https://${pS3BucketName}.${s3Region}.amazonaws.com/${pS3KeyPrefix}/${templateName}
+        - s3Region: !If [cIsGovCloud, !Sub "s3-${AWS::Region}", s3]
+          templateName: igw-ingress-route.yml
+      Parameters:
+        pVpc: !GetAtt rFireWall.Outputs.oVpcId
+        pVpcName: !Ref pVpcName
+        pNetworkFirewallSubnetAz1: !Ref pAvailabilityZone1
+        pNetworkFirewallSubnetAz2: !Ref pAvailabilityZone2
+        pProtectedSubnet1Cidr: !Ref pProtectedSubnet1Cidr
+        pProtectedSubnet2Cidr: !Ref pProtectedSubnet2Cidr
+        pVpcEndpoints: !GetAtt rFireWall.Outputs.oNetworkFirewallEndpoint
+        pInternetGatewayId: !GetAtt rFireWall.Outputs.oInternetGatewayId
+
+  rSlackNFWIntegration: # Creates alertin infra Alert bucket, s3 event config, reoles and permissions, lambda for slack.
+    DependsOn:
+      - rFireWall
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub
+        - https://${pS3BucketName}.${s3Region}.amazonaws.com/${pS3KeyPrefix}/${templateName}
+        - s3Region: !If [cIsGovCloud, !Sub "s3-${AWS::Region}", s3]
+          templateName: slackLambda.yml
+      Parameters:
+        pNFWArn: !GetAtt rFireWall.Outputs.oNetworkFirewallId
+        # pSlackSecretArn: !Ref pSlackSecretArn
+        pAWSSecretName4Slack: !Ref pAWSSecretName4Slack
+        pSlackChannelName: !Ref pSlackChannelName
+        pSlackUserName: !Ref pSlackUserName
+        pSecretKey: !Ref pSecretKey
+        pWebHookUrl: !Ref pWebHookUrl
+        plambdaSrcS3: !Ref pS3BucketName
+        plambdaSrcS3Prefix: !Ref pS3KeyPrefix
+        pAlertS3Bucket: !Ref pAlertS3Bucket
+        pSecretTagName: !Ref pSecretTagName
+        pSecretTagValue: !Ref pSecretTagValue
+        pdestCidr: !Ref pdestCidr
+        pdestCondition: !Ref pdestCondition
+        psrcCidr: !Ref psrcCidr
+        psrcCondition: !Ref psrcCondition
+
+

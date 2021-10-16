@@ -1,0 +1,72 @@
+# (c) 2020 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
+# This AWS Content is provided subject to the terms of the AWS Customer
+# Agreement available at https://aws.amazon.com/agreement/ or other written
+# agreement between Customer and Amazon Web Services, Inc.
+# Author : vaidys@amazon.com
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates the route table for IGW with VPCE for ingress inspection
+Parameters:
+  pVpc:
+    Type: String
+  pProtectedSubnet1Cidr:
+    Type: String
+  pProtectedSubnet2Cidr:
+    Type: String
+  pNetworkFirewallSubnetAz1:
+    Type: String
+  pNetworkFirewallSubnetAz2:
+    Type: String
+  pVpcName:
+    Type: String
+  pVpcEndpoints:
+    Type: String
+  pInternetGatewayId:
+    Type: String
+
+
+#Conditions:
+#  CAz1:
+#    !Equals [
+#    !Select ["0",!Split [":",!Select ["0", !Split [",", !Ref pVpcEndpoints]]]], !Ref pNetworkFirewallSubnetAZ1
+#    ]
+#  CAz2:
+#    !Equals [
+#    !Select ["0",!Split [":",!Select ["1", !Split [",", !Ref pVpcEndpoints]]]], !Ref pNetworkFirewallSubnetAZ2
+#    ]
+
+Resources:
+  rIgwRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref pVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-igw-rt
+
+  rVPCERoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref rIgwRt
+      DestinationCidrBlock: !Ref pProtectedSubnet1Cidr
+      VpcEndpointId: !Select ["1",!Split [":",!Select ["0", !Split [",", !Ref pVpcEndpoints]]]]
+
+  rVPCERoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref rIgwRt
+      DestinationCidrBlock: !Ref pProtectedSubnet2Cidr
+      VpcEndpointId: !Select ["1",!Split [":",!Select ["1", !Split [",", !Ref pVpcEndpoints]]]]
+
+  rIgwRtAssociation:
+    Type: AWS::EC2::GatewayRouteTableAssociation
+    Properties:
+      GatewayId: !Ref pInternetGatewayId
+      RouteTableId: !Ref rIgwRt
+
+Outputs:
+  oIgwRt:
+    Value: !Ref rIgwRt
+    Export:
+      Name: IgwRtId
+
