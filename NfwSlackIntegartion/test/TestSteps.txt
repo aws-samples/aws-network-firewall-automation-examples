@@ -1,0 +1,23 @@
+1. Create  an Ec2 instance in one of the protected subnet
+2. Use the following  user data to install a web server on the ec2 instance:
+#!/bin/bash
+yum install httpd -y
+systemctl start httpd
+systemctl stop firewalld
+cd /var/www/html
+echo "Hello!! this is Venki's test installation, 200 OK" > index.html
+
+
+3. Create the following NFW rules:
+stateless rule:
+Source: 0.0.0.0/0
+Destination 10.0.3.65/32 ( Private IP of the Ec2)
+Action: Forward
+
+StatefUl rule:
+Protocol: HTTP
+Source ip/port: Any / Any
+Destination ip/port: Any /Any
+
+
+Test end point: <Get the public IP of the web server>cd ,,

@@ -1,0 +1,240 @@
+# (c) 2020 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
+# This AWS Content is provided subject to the terms of the AWS Customer
+# Agreement available at https://aws.amazon.com/agreement/ or other written
+# agreement between Customer and Amazon Web Services, Inc.
+# Author : vaidys@amazon.com
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template creates the VPC with firewall, protected and private subnets along with AWS Network Firewall, NAT Gateways and necessary VPC routing.
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+      - Label:
+          default: VPC Configuration
+        Parameters:
+          - pVpcName
+          - pVpcCidr
+          - pVpcInstanceTenancy
+          - pNetworkFirewallSubnetAz1
+          - pNetworkFirewallSubnet1Cidr
+          - pNetworkFirewallSubnetAz2
+          - pNetworkFirewallSubnet2Cidr
+          - pProtectedSubnetAz1
+          - pProtectedSubnet1Cidr
+          - pProtectedSubnetAz2
+          - pProtectedSubnet2Cidr
+
+Parameters:
+  pVpcName:
+    Type: String
+    Default: Inspection
+  pVpcCidr:
+    Type: String
+  pVpcInstanceTenancy:
+    Type: String
+  pNetworkFirewallSubnetAz1:
+    Type: String
+  pNetworkFirewallSubnet1Cidr:
+    Type: String
+  pNetworkFirewallSubnetAz2:
+    Type: String
+  pNetworkFirewallSubnet2Cidr:
+    Type: String
+  pProtectedSubnetAz1:
+    Type: String
+  pProtectedSubnet1Cidr:
+    Type: String
+  pProtectedSubnetAz2:
+    Type: String
+  pProtectedSubnet2Cidr:
+    Type: String
+
+Resources:
+  rVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref pVpcCidr
+      EnableDnsHostnames: True
+      EnableDnsSupport: True
+      InstanceTenancy: !Ref pVpcInstanceTenancy
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-vpc
+
+# NetworkFirewallSubnets
+  rIgw:
+    Type: AWS::EC2::InternetGateway
+    DependsOn: rVpc
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-igw
+  rAttachIgw:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref rVpc
+      InternetGatewayId: !Ref rIgw
+
+  rNetworkFirewallSubnetRt:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref rVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-network-firewall-subnet-rt
+  rNetworkFirewallSubnetRtDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - rIgw
+      - rAttachIgw
+    Properties:
+      RouteTableId: !Ref rNetworkFirewallSubnetRt
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref rIgw
+
+  rNetworkFirewallSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn: rVpc
+    Properties:
+      VpcId: !Ref rVpc
+      CidrBlock: !Ref pNetworkFirewallSubnet1Cidr
+      AvailabilityZone: !Ref pNetworkFirewallSubnetAz1
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-network-firwall-subnet-1
+  rNetworkFirewallSubnetRtAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref rNetworkFirewallSubnet1
+      RouteTableId: !Ref rNetworkFirewallSubnetRt
+  rNetworkFirewallSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn: rVpc
+    Properties:
+      VpcId: !Ref rVpc
+      CidrBlock: !Ref pNetworkFirewallSubnet2Cidr
+      AvailabilityZone: !Ref pNetworkFirewallSubnetAz2
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-network-firwall-subnet-2
+  rNetworkFirewallSubnetRtAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref rNetworkFirewallSubnet2
+      RouteTableId: !Ref rNetworkFirewallSubnetRt
+
+# Protected Subnets
+  rProtectedSubnetRt1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref rVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-protected-subnet-rt-1
+  rProtectedSubnetRt2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref rVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-protected-subnet-rt-2
+  rProtectedSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref rVpc
+      CidrBlock: !Ref pProtectedSubnet1Cidr
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Ref pProtectedSubnetAz1
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-protected-subnet-1
+  rProtectedSubnetRtAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref rProtectedSubnet1
+      RouteTableId: !Ref rProtectedSubnetRt1
+  rProtectedSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref rVpc
+      CidrBlock: !Ref pProtectedSubnet2Cidr
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Ref pProtectedSubnetAz2
+      Tags:
+        - Key: Name
+          Value: !Sub ${pVpcName}-protected-subnet-2
+  rProtectedSubnetRtAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref rProtectedSubnet2
+      RouteTableId: !Ref rProtectedSubnetRt2
+
+### Network Firewall
+  rNetworkFirewallPolicy:
+    Type: 'AWS::NetworkFirewall::FirewallPolicy'
+    Properties:
+      FirewallPolicyName: AWS-Network-Firewall-Policy
+      FirewallPolicy:
+        StatelessDefaultActions:
+          - 'aws:pass'
+        StatelessFragmentDefaultActions:
+          - 'aws:pass'
+  rNetworkFirewall:
+    Type: AWS::NetworkFirewall::Firewall
+    Properties:
+      FirewallName: AWS-Network-Firewall
+      FirewallPolicyArn: !Ref rNetworkFirewallPolicy
+      VpcId: !Ref rVpc
+      SubnetMappings:
+        - SubnetId: !Ref rNetworkFirewallSubnet1
+        - SubnetId: !Ref rNetworkFirewallSubnet2
+      Tags:
+        - Key: Name
+          Value: AWS-Network-Firewall
+Outputs:
+  oVpcId:
+    Value: !Ref rVpc
+    Export:
+      Name: ProtectedVpcId
+  oNetworkFirewallId:
+    Value: !Ref rNetworkFirewall
+    Export:
+      Name: NetworkFirewall
+  oNetworkFirewallEndpoint:
+    Description: Network firewall vpc endpoints
+    Value: !Join [ ",",!GetAtt rNetworkFirewall.EndpointIds]
+    Export:
+      Name: NetworkFirewallVPCE
+  oNetworkFirewallSubnet1Id:
+    Value: !Ref rNetworkFirewallSubnet1
+    Export:
+      Name: NetworkFirewallSubnet1
+  oNetworkFirewallSubnet2Id:
+    Value: !Ref rNetworkFirewallSubnet2
+    Export:
+      Name: NetworkFirewallSubnet2
+  oProtectedSubnet1Id:
+    Value: !Ref rProtectedSubnet1
+    Export:
+      Name: ProtectedSubnet1
+  oProtectedSubnet2Id:
+    Value: !Ref rProtectedSubnet2
+    Export:
+      Name: ProtectedSubnet2
+  oProtectedSubnetRt1Id:
+    Value: !Ref rProtectedSubnetRt1
+    Export:
+      Name: ProtectedSubnetRouteTable1
+  oProtectedSubnetRt2Id:
+    Value: !Ref rProtectedSubnetRt2
+    Export:
+      Name: ProtectedSubnetRouteTable2
+  oInternetGatewayId:
+    Value: !Ref rIgw
+    Export:
+      Name: InternetGateway
+
+
+
+
+

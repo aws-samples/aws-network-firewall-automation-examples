@@ -1,0 +1,47 @@
+# (c) 2020 Amazon Web Services, Inc. or its affiliates. All Rights Reserved.
+# This AWS Content is provided subject to the terms of the AWS Customer
+# Agreement available at https://aws.amazon.com/agreement/ or other written
+# agreement between Customer and Amazon Web Services, Inc.
+# Author : vaidys@amazon.com
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Creates the default routes with Firewall VPCE as targets for protected subnets
+Parameters:
+  pVpcEndpoints:
+    Type: String
+  pNetworkFirewallSubnetAz1:
+    Type: String
+  pNetworkFirewallSubnetAz2:
+    Type: String
+  ProtectedSubnetRouteTable1:
+    Type: String
+  ProtectedSubnetRouteTable2:
+    Type: String
+
+Conditions:
+  CAz1:
+    !Equals [
+    !Select ["0",!Split [":",!Select ["0", !Split [",", !Ref pVpcEndpoints]]]], !Ref pNetworkFirewallSubnetAz1
+    ]
+  CAz2:
+    !Equals [
+    !Select ["0",!Split [":",!Select ["1", !Split [",", !Ref pVpcEndpoints]]]], !Ref pNetworkFirewallSubnetAz2
+    ]
+
+Resources:
+  rProtectedRoute1:
+    Condition: CAz1
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref ProtectedSubnetRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      VpcEndpointId: !Select ["1",!Split [":",!Select ["0", !Split [",", !Ref pVpcEndpoints]]]]
+
+  rProtectedRoute2:
+    Condition: CAz2
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref ProtectedSubnetRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      VpcEndpointId: !Select ["1",!Split [":",!Select ["1", !Split [",", !Ref pVpcEndpoints]]]]
+
