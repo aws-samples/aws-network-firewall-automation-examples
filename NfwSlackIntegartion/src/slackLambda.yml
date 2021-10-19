@@ -176,6 +176,10 @@ Resources:
     DependsOn: rLambdaPermission
     Properties:
       BucketName: !Ref pAlertS3Bucket
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: 'AES256'      
       NotificationConfiguration:
         LambdaConfigurations:
           - Event: 's3:ObjectCreated:Put'
