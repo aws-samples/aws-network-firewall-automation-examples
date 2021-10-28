@@ -36,7 +36,7 @@ let updateRules = async function (ruleGroup) {
   return;
 };
 
-let createRules = async function (ruleGroup, type, rules) {
+let createRules = async function (ruleGroup, rules) {
  
   let rulesString = "# Last updated: " + new Date().toUTCString() + "\n";
   rulesString += rules;
@@ -55,7 +55,7 @@ exports.handler = async (event, context) => {
   let res = await networkfirewall.describeRuleGroup(params).promise();
   if (res.RuleGroupResponse) {
     console.log("Found Rule Group...");
-    await createRules(res, rgAction, rules);
+    await createRules(res, rules);
   } else {
     console.log("ERROR: No matching Rule Group found...");
   }
