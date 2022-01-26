@@ -78,30 +78,5 @@ This solution provides 2 protected subnets (Protected Subnet), 2 Network Firewal
   7. slack-lambda.py.zip
 3. Using console create a stack by choosing base.yml.
 
-#### Deployment Parameters:
-
-| Parameter Name | Purpose | Sample value |
-| --- | --- | --- |
-| pAWSSecretName4Slack | Name of the secret that holds slack url | SlackEnpoint-Cfn |
-| pAlertS3Bucket | Name of the s3 buckets to be created, this S3 bucket will be used as the Network firewall alert destination | usw2-05-some\_name-nfw-alerts |
-| pAvailabilityZone1 | Pick an aws AZ | us-west-2a |
-| pAvailabilityZone2 | Pick another aws AZ | us-west-2b |
-| pNetworkFirewallSubnet1Cidr | Choose a Subnet CIDR for FW Subnet (minimum /28) | 10.0.1.0/24 |
-| pNetworkFirewallSubnet2Cidr | Choose a Subnet CIDR for FW Subnet (minimum /28) | 10.0.2.0/24 |
-| pProtectedSubnet1Cidr | Choose a Subnet CIDR for workload | 10.0.3.0/24 |
-| pProtectedSubnet2Cidr | Choose a Subnet CIDR for workload | 10.0.4.0/24 |
-| pS3BucketName | Name of the existing bucket where the source code is located | usw2-venki-lambda-functions |
-| pS3KeyPrefix | Name of the bucket prefix where the source code is located | aod-test |
-| pSecretKey | Can be any key, use the default - recommended | webhookUrl |
-| pSecretTagName | Tag name for the Secret | AppName |
-| pSecretTagValue | Tag value for the above tag name | LambdaSlackIntegration |
-| pSlackChannelName | Pre created channel name | nfw-alert-notifications |
-| pSlackUserName | Slack User name | Raman Subban |
-| pVpcCidr | A CIDR range for VPC to be creted | 10.0.0.0/16 |
-| pVpcInstanceTenancy | default | default |
-| pVpcName | Name for the VPC to be created | Inspection |
-| pWebHookUrl | Value of the Slack url | [https://hooks.slack.com/services/T???9T??/A031885JRM7/9D4Ydm8dfgIYV5NfN9N7WDeQ](https://hooks.slack.com/services/T???9T??/A031885JRM7/9D4Ydm8dfgIYV5NfN9N7WDeQ) |
-| pdestCidr | Filter for Destination CIDR Range | 10.0.0.0/16 |
-| pdestCondition | Flag to indicate to exclude or include the Destination match | include or exclude |
-| psrcCidr | Filter for Source CIDR Range | 118.2.0.0/16 |
-| psrcCondition | Flag to indicate to exclude or include the Source match | include or exclude |
+#### Deployment Parameters: 
+Refer : docs/NfwAlerts_Slack_Integration.docx
