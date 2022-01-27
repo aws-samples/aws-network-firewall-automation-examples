@@ -11,6 +11,7 @@ import logging
 import urllib.parse
 from io import BytesIO
 import gzip
+import base64
 import requests
 from botocore.exceptions import ClientError
 from ipaddress import ip_network, ip_address
