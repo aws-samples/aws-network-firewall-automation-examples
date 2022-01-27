@@ -153,7 +153,7 @@ def get_secret():
             return webhookUrl
         else:
             decoded_binary_secret = base64.b64decode(get_secret_value_response['SecretBinary'])
-            return 
+            return decoded_binary_secret
    
 
     
