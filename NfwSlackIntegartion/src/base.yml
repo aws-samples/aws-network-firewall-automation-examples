@@ -34,7 +34,7 @@ Metadata:
           # - pSecretName 
           - pSecretKey
           - pWebHookUrl
-          - plambdaSrcS3
+          # - plambdaSrcS3
           - pAlertS3Bucket     
           - pSecretTagName
           - pSecretTagValue
@@ -109,9 +109,9 @@ Parameters:
   pSecretTagValue:
     Type: String
     Default: LambdaSlackIntegration    
-  plambdaSrcS3:
-    Type: String
-    Default: bucket-where-source-is - us-w2-yourname-lambda-functions
+  # plambdaSrcS3:
+  #   Type: String
+  #   Default: bucket-where-source-is - us-w2-yourname-lambda-functions
   pAlertS3Bucket:
     Type: String
     Default: unique-bucket-name-please - us-w2-yourname-security-aod-alerts
