@@ -97,7 +97,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Role: !GetAtt LambdaExecutionRole.Arn
-      Runtime: nodejs12.x
+      Runtime: nodejs16.x
       Handler: index.handler
       Timeout: 60
       Description: Used to fetch data from the Emerging Threats Bot CC list and update the associated RuleGroup

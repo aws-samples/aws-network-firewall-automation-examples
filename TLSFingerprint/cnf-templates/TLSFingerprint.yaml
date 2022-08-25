@@ -114,7 +114,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Role: !GetAtt LambdaExecutionRole.Arn
-      Runtime: nodejs12.x
+      Runtime: nodejs16.x
       Handler: index.handler
       Timeout: 600
       Description: Used to check TLS server fingerprint and update the associated RuleGroup
