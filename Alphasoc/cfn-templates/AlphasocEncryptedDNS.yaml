@@ -96,7 +96,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Role: !GetAtt LambdaExecutionRole.Arn
-      Runtime: nodejs14.x
+      Runtime: nodejs16.x
       Handler: index.handler
       Timeout: 60
       Description: Used to fetch data from the Alphasoc Encrypted DNS list and update the associated RuleGroup
