@@ -105,7 +105,7 @@ exports.handler = async (event, context) => {
       }
     }
 
-    newRule += 'drop tls $EXTERNAL_NET any -> $HOME_NET any (msg:"Drop all other TLS fingerprints"; tls.fingerprint:":"; sid:1; rev:1;)';
+    newRule += 'drop tls $EXTERNAL_NET any -> $HOME_NET any (msg:"Drop all other TLS traffic"; sid:1; rev:1;)';
     
     await updateRuleGroup(newRule);
   } else {
