@@ -1,0 +1,346 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  NetworkFirewallLogGroupName:
+    Type: String
+    Description: Name of CloudWatch Logs log group for NFW logs
+  RuleGroupCapacity:
+    Type: Number
+    MinValue: 1
+    MaxValue: 10000
+    Default: 1000
+    Description: The hard limit for rule group capacity is 30,000 but due to the size of rule strings we have a lower max capacity.
+  RuleSidPrefix:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 1000
+    Description: Prefix of SID to ensure rules are unique across rule groups. For example, RuleGroupCapacity=1000 and RuleSidPrefix=3 then the first SID is 3000.
+  RuleGroupName:
+    Type: String
+    Default: AllowedSni
+    Description: Name of the Network Firewall rule group that we generate.
+  AlertMessage:
+    Type: String
+    Default: Allow-Listed-SNI
+    Description: Message used in alert rules.
+  CloudWatchMetricsNamespace:
+    Type: String
+    Default: SNI
+  Timestamp:
+    Type: String
+    Default: 1
+    Description: "Optional: update this to forces Lambda to update code"
+Resources:
+
+  RuleGroup:
+    Type: AWS::NetworkFirewall::RuleGroup
+    Properties:
+      Capacity: !Ref RuleGroupCapacity
+      Description: auto-generated allow-list for domains in SNI
+      RuleGroupName: !Ref RuleGroupName
+      RuleGroup:
+        RulesSource:
+          # Rule groups can't be empty; this default rule gets replaced
+          RulesString: !Sub "pass tls $HOME_NET any -> $EXTERNAL_NET any (sid:${Timestamp};)"
+        StatefulRuleOptions:
+          RuleOrder: STRICT_ORDER
+      Type: STATEFUL
+
+  FlowStatsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: fqdn
+          AttributeType: S
+      KeySchema:
+        - AttributeName: fqdn
+          KeyType: HASH
+
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref RuleGroupUpdaterFunction
+      Description: Invokes Lambda function to refresh NFW rule group
+      ScheduleExpression: rate(1 minute)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt RuleGroupUpdaterFunction.Arn
+          Id: RuleGroupUpdater
+
+  EventRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RuleGroupUpdaterFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventRule.Arn
+
+  LambdaSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    DependsOn: SubscriptionFilterPermission
+    Properties:
+      DestinationArn: !GetAtt RuleGroupUpdaterFunction.Arn
+      FilterName: !Ref RuleGroupUpdaterFunction
+      FilterPattern: '{ ($.event.app_proto = "tls") && ($.event.proto = "TCP") && ($.event.dest_port = 443) }'
+      LogGroupName: !Ref NetworkFirewallLogGroupName
+
+  SubscriptionFilterPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RuleGroupUpdaterFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: logs.amazonaws.com
+
+  RuleGroupUpdaterFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - RuleGroupUpdaterFunctionPolicy
+      - FlowStatsTable
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3, json, os, base64, gzip, datetime, math
+
+          ddb = boto3.client("dynamodb")
+          nfw = boto3.client("network-firewall")
+          cw = boto3.client("cloudwatch")
+
+          DDB_TABLE_NAME = os.getenv("DDB_TABLE_NAME")
+          RULE_GROUP_ARN = os.getenv("RULE_GROUP_ARN")
+          MAX_RULES = int(os.getenv("MAX_RULES"))
+          RULE_SID_PREFIX = int(os.getenv("RULE_SID_PREFIX"))
+          ALERT_MESSAGE = os.getenv("ALERT_MESSAGE")
+          CW_METRICS_NAMESPACE = os.getenv("CW_METRICS_NAMESPACE")
+
+          ALERT_TEMPLATE = 'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"{message}"; tls.sni; content:"{fqdn}"; startswith; nocase; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{flows}; sid:{sid};)'
+          PASS_TEMPLATE = 'pass tls $HOME_NET any -> $EXTERNAL_NET any (tls.sni; content:"{fqdn}"; startswith; nocase; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{flows}; sid:{sid};)'
+
+          def get_fqdn_stats() -> dict:
+              fqdn_stats = {}
+              result = ddb.scan(
+                  TableName=DDB_TABLE_NAME, ProjectionExpression="fqdn,source_ips,flows"
+              )
+              for item in result["Items"]:
+                  fqdn = item["fqdn"]["S"]
+                  stats = {
+                      "source_ips": set(item["source_ips"]["SS"]),
+                      "flows": int(item["flows"]["N"]),
+                  }
+                  fqdn_stats[fqdn] = stats
+
+              return fqdn_stats
+
+
+          def update_statistics(alert_json) -> None:
+              source_ip = alert_json["event"]["src_ip"]
+              domain = alert_json["event"]["tls"].get("sni", None)
+              if not domain:
+                  print("update_statistics(): tls sni not found")
+                  return
+
+              params = {
+                  "TableName": DDB_TABLE_NAME,
+                  "Key": {"fqdn": {"S": domain}},
+                  "UpdateExpression": "ADD source_ips :source_ips, flows :one",
+                  "ExpressionAttributeValues": {
+                      ":source_ips": {"SS": [source_ip]},
+                      ":one": {"N": "1"},
+                  },
+              }
+              ddb.update_item(**params)
+
+
+          def update_metrics(alert_json) -> None:
+              domain = alert_json["event"]["tls"].get("sni", None)
+              if not domain:
+                  print("update_metrics(): tls sni not found")
+                  return
+
+              firewall_name = alert_json["firewall_name"]
+              timestamp = alert_json["event"]["timestamp"]
+              timestamp_dt = datetime.datetime.fromisoformat(timestamp)
+              #timestamp_millis = int(timestamp_dt.timestamp() * 1000)
+              metrics = [
+                  {
+                      "MetricName": "Flows",
+                      "Dimensions": [
+                          {
+                              "Name": "FirewallName",
+                              "Value": firewall_name
+                          },
+                          {
+                              "Name": "Domain",
+                              "Value": domain
+                          }
+                      ],
+                      "Value": 1,
+                      "Timestamp": timestamp_dt,
+                      "Unit": "Count",
+                      "StorageResolution": 60
+                  }
+              ]
+              cw.put_metric_data(Namespace=CW_METRICS_NAMESPACE, MetricData=metrics)
+
+          def process_logs(event) -> None:
+              data = event["awslogs"]["data"]
+              decoded_event = json.loads(gzip.decompress(base64.b64decode(data)))
+              log_events = decoded_event["logEvents"]
+              print(f"processing {len(log_events)} log events")
+              for log_event in decoded_event["logEvents"]:
+                  body = log_event["message"]
+                  alert_json = json.loads(body)
+                  update_statistics(alert_json)
+                  update_metrics(alert_json)
+
+
+          def update_rule_group(event) -> None:
+              # Get FQDN stats from DynamoDB table
+
+              fqdn_stats = get_fqdn_stats()
+              # print(json.dumps(fqdn_stats, default=str))
+
+              if not fqdn_stats:
+                  print("no SNI logs have been processed")
+                  return
+              print(f"total SNI domains: {len(fqdn_stats)} rules")
+
+              # Generate a list of Suricata rules from stats
+
+              def flows(fqdn) -> int:
+                  return fqdn_stats[fqdn]['flows']
+
+              sorted_fqdns = sorted(fqdn_stats.keys(), key=flows, reverse=True)
+              top_fqdns = sorted_fqdns[:MAX_RULES]
+              print(f"creating rules for {len(top_fqdns)} domains")
+
+              # Determine max length of SID so we can pad with zeros.
+              # e.g. if rule capacity is 900 or 1000, sid_width is 3
+
+              sid_width = math.ceil(math.log10(MAX_RULES))
+
+              i = 0
+              rules = []
+              for fqdn in top_fqdns:
+                  stats = fqdn_stats[fqdn]
+
+                  sid = str(i).zfill(sid_width)
+                  params = {
+                      "fqdn": fqdn,
+                      "clients": len(stats["source_ips"]),
+                      "flows": stats["flows"],
+                      "sid": f"{RULE_SID_PREFIX}{sid}",
+                      "message": ALERT_MESSAGE,
+                  }
+                  rules.append(ALERT_TEMPLATE.format(**params))
+                  i += 1
+
+                  sid = str(i).zfill(sid_width)
+                  params = {
+                      "fqdn": fqdn,
+                      "clients": len(stats["source_ips"]),
+                      "flows": stats["flows"],
+                      "sid": f"{RULE_SID_PREFIX}{sid}",
+                  }
+                  rules.append(PASS_TEMPLATE.format(**params))
+                  i += 1
+
+              # Get UpdateToken so we can update the rule group
+
+              rule_group = nfw.describe_rule_group(RuleGroupArn=RULE_GROUP_ARN, Type="STATEFUL")
+
+              # Update the rule group with latest set of rules
+
+              rule_string = "\n".join(rules)
+              print(f"rule string size: {len(rule_string)}")
+              # Note: max rule string size is 2,000,000 bytes
+
+              params = {
+                  "UpdateToken": rule_group["UpdateToken"],
+                  "RuleGroupArn": RULE_GROUP_ARN,
+                  "RuleGroup": {
+                      "RulesSource": {"RulesString": rule_string},
+                      "StatefulRuleOptions": {"RuleOrder": "STRICT_ORDER"},
+                  },
+                  "Type": "STATEFUL",
+                  "EncryptionConfiguration": {"Type": "AWS_OWNED_KMS_KEY"},
+              }
+              print(f"UpdateRuleGroup {params=}")
+              nfw.update_rule_group(**params)
+
+
+          def handler(event, context) -> None:
+              if "awslogs" in event:
+                  # CloudWatch Logs
+                  process_logs(event)
+              else:
+                  # EventBridge
+                  update_rule_group(event)
+      Handler: index.handler
+      LoggingConfig:
+        LogGroup: !Ref RuleGroupUpdaterFunctionLogGroup
+      MemorySize: 256
+      Environment:
+        Variables:
+          RULE_GROUP_ARN: !GetAtt RuleGroup.RuleGroupArn
+          DDB_TABLE_NAME: !Ref FlowStatsTable
+          MAX_RULES: !Ref RuleGroupCapacity
+          RULE_SID_PREFIX: !Ref RuleSidPrefix
+          ALERT_MESSAGE: !Ref AlertMessage
+          CW_METRICS_NAMESPACE: !Ref CloudWatchMetricsNamespace
+          TIMESTAMP: !Ref Timestamp  # forces code to update
+      ReservedConcurrentExecutions: 2
+      Role: !GetAtt RuleGroupUpdaterFunctionRole.Arn
+      Runtime: python3.12
+      Timeout: 10
+
+  RuleGroupUpdaterFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 1
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-RuleGroupUpdaterFunction"
+      
+  RuleGroupUpdaterFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+
+  RuleGroupUpdaterFunctionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: LambdaPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: "arn:aws:logs:*:*:*"
+          - Effect: Allow
+            Action:
+              - network-firewall:DescribeRuleGroup
+              - network-firewall:UpdateRuleGroup
+            Resource: !GetAtt RuleGroup.RuleGroupArn
+          - Effect: Allow
+            Action:
+              - dynamodb:Scan
+              - dynamodb:UpdateItem
+            Resource: !GetAtt FlowStatsTable.Arn
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: "*"
+      Roles:
+        - !Ref RuleGroupUpdaterFunctionRole
