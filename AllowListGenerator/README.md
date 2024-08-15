@@ -2,9 +2,7 @@
 
 This repository contains an AWS CloudFormation template that helps automate the allow list creation process for AWS Network Firewall based on network traffic logs. The solution analyzes the Network Firewall alert logs in Amazon CloudWatch Logs, identifies the Server Name Indication (SNI) values associated with TLS traffic + the hostname associated with HTTP traffic and generates the corresponding allow rules in Suricata format. 
 
-The template provisions the necessary resources, including a DynamoDB table to store domain information, a Lambda function to process logs and update the rule group, a CloudWatch Log Subscription Filter to send logs to the Lambda function, and the Network Firewall Rule Group itself. Additionally, an EventBridge Rule is created to periodically trigger the Lambda function and ensure that the rule group is updated based on the latest network traffic patterns.
-
-This solution is intended to help with building an allow list-based architecture for controlling outbound TLS/HTTP traffic from your workloads. It is not a fully automated solution, but rather a tool to surface the domains your workloads are reaching via TLS/HTTP, which can then be used to build out allow list rules. While this solution does not provide a fully automated allow list configuration, it aims to simplify the process of building and maintaining an allow list by providing visibility into the domains being accessed and generating rule recommendations based on the observed traffic patterns.
+This solution is intended to help with building an allow list-based architecture for controlling outbound HTTP/TLS traffic from your workloads. It is not a fully automated solution, but rather a tool to surface the domains your workloads are reaching via HTTP/TLS, which can then be used to build out allow list rules. While this solution does not provide a fully automated allow list configuration, it aims to simplify the process of building and maintaining an allow list by providing visibility into the domains being accessed and generating rule recommendations based on the observed traffic patterns.
 
 ## Architecture
 
@@ -16,8 +14,9 @@ This solution is intended to help with building an allow list-based architecture
 The CloudFormation template creates the following resources:
 
 1. **Amazon CloudWatch Log Subscription Filter**: Sends Network Firewall alert logs to the Lambda function for processing.
+2. **Amazon CloudWatch Metrics**: Publishes CloudWatch metrics for each domain, protocol, and firewall combination. This allows you to monitor and visualize the network traffic patterns for your workloads.
 2. **Amazon EventBridge Rule**: Triggers the Lambda function periodically (every hour by default) to update the Network Firewall rule group with the latest allow list rules.
-3. **AWS Lambda Function**: Processes the Network Firewall alert logs and updates the DynamoDB table with domains and metrics.
+3. **AWS Lambda Function**: Processes the Network Firewall alert logs and updates the DynamoDB table + CloudWatch metric, as well as generates the Suricata allow list rules.
 4. **Amazon DynamoDB Table**: Stores the domains and associated metrics (unique source IP addresses + EC2 instance IDs requesting domain and total number of requests to domain) from the Network Firewall logs.
 5. **AWS Network Firewall Rule Group**: Stores the generated allow list rules based on the domain values and metrics. Rules are ordered by number of requests to each domain, with the most requested domains appearing at the top of each rule group section. This rule group consists of four different sections:
       - **TLS Wildcard Rules**: This section contains wildcard TLS rules for domains that have reached the configured threshold of subdomains (defined by the WildcardDomainMinimum parameter).
@@ -47,6 +46,8 @@ If you have not deployed AWS Network Firewall in your VPC, you can use one of th
    - `RuleGroupCapacity`: The maximum number of rules allowed in the Network Firewall rule group (default: 1000).
    - `RuleSidPrefix`: The prefix for the rule SIDs to ensure uniqueness across rule groups (default: 1).
    - `RuleGroupName`: The name of the Network Firewall rule group (default: "StrictAllowListRuleGroup").
+   - `CloudWatchMetricsNamespace`: The namespace for the CloudWatch metrics.
+   - `RateInMinutes`: The rate (in minutes) at which the Lambda function will be invoked to update the Network Firewall rule group. This value must be greater than 1. (Default is every 60 minutes).
    - `AlertMessage`: The message used in the alert rules (default: "Allow-Listed-Domain").
    - `WildcardDomainMinimum`: Minimum number of subdomains reached before a wildcard rule is added to allow all subdomains for the corresponding domain (default: 15). For example, if this value is set to 15, once 15 different subdomains under the same domain are reached, a rule will be added to the WildcardAllowListRuleGroup to allow the entire domain and any subdomains.
 3. After successful deployment, the stack will start processing the Network Firewall logs and updating the DynamoDB table with domain values and metrics.
@@ -61,6 +62,8 @@ To help better understand the solution, let's say this stack was deployed with t
 
 In this example, the entire `amazon.com` is added to the TLS wildcard rule group section since 3 subdomains associated with that domain have been reached via TLS. (HTTP wildcard section functions the same way)
 
+**Note:** In the CloudWatch metrics screenshot, I requested all the domains at the same time. For normal traffic patterns, these points would be more scatterred around the graph at the specific time the domains were requested. 
+
 ### DynamoDB Table
 
 ![DynamoDB Table Example](./images/dynamodb-table-example.png)
@@ -70,6 +73,10 @@ In this example, the entire `amazon.com` is added to the TLS wildcard rule group
 
 ![Network Firewall Rule Group Example](./images/nfw-rule-group-example.png)
 
+### CloudWatch Metrics
+
+![CloudWatch Metrics Example](./images/cloudwatch-metrics-example.png)
+
 
 ## Why Use This Solution?
 
@@ -77,11 +84,9 @@ This solution addresses several challenges and provides benefits in managing net
 
 - **Reduce Attack Surface**: Domain-based allow lists with a default deny can offer significant risk mitigation. Rather than try to maintain a constantly updated list of all current and future potential threats to detect and block, it can be much simpler to limit application workloads to only communicate with the trusted domains that are necessary for their operation. Also, domain names (unlike IP addresses) change infrequently.
 
-- **Visibility into Network Traffic**: By analyzing the Network Firewall logs, this solution provides valuable insights into the network traffic patterns, including the domains and subdomains being accessed, the information on which clients are accessing each domain, and the total requests to each domain. 
+- **Visibility into Network Traffic**: By analyzing the Network Firewall logs, this solution provides valuable insights into the network traffic patterns, including the domains and subdomains being accessed, the timestamps of when they're being accessed, the information on which clients are accessing each domain, and the total requests to each domain. 
 
-- **Lightweight and Non-Disruptive**: This solution does not require deploying additional Network Firewall resources or making changes to your existing Network Firewall configuration (besides ensuring 'Alert Established' is enabled and storing alert logs in a CloudWatch logs group). It seamlessly integrates with your existing Network Firewall deployment, leveraging the logs generated by the firewall to create and maintain the allow list rules.
-
-- **Flexibility and Scalability**: The solution leverages serverless services like AWS Lambda and Amazon DynamoDB, making it highly scalable and cost-effective. It can handle varying traffic volumes without the need for provisioning and managing infrastructure manually.
+- **Lightweight and Non-Disruptive**: This solution does not require deploying additional Network Firewall resources or making changes to your existing Network Firewall configuration (besides ensuring 'Alert Established' is enabled and storing alert logs in a CloudWatch logs group). It seamlessly integrates with your existing Network Firewall deployment, leveraging the logs generated by the firewall to create the allow list rules.
 
 - **Wildcard Domain Support**: The solution includes a support for domains with a large number of subdomains (configurable threshold), allowing for more efficient and manageable rule sets. 
 
@@ -99,6 +104,7 @@ The additional services introduced by this solution and their pricing models are
 - **AWS Lambda**: Refer to the [Lambda pricing](https://aws.amazon.com/lambda/pricing/) page for more details.
 - **Amazon DynamoDB**: Refer to the [DynamoDB pricing](https://aws.amazon.com/dynamodb/pricing/) page for more details.
 - **Amazon EventBridge**: Refer to the [EventBridge pricing](https://aws.amazon.com/eventbridge/pricing/) page for more details.
+- **Amazon CloudWatch**: Refer to the [CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/) page for more details. 
 
 It's recommended to estimate the expected costs based on your specific usage patterns and requirements before deploying this solution.
 

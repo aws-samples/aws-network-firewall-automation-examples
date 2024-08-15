@@ -1,9 +1,10 @@
----
+# This templates creates the resources required to generate an allow list based on NFW logs
+
 AWSTemplateFormatVersion: "2010-09-09"
 Parameters:
   NetworkFirewallLogGroupName:
     Type: String
-    Description: Name of CloudWatch Logs log group for NFW logs
+    Description: Insert the name of your currently existing CloudWatch Logs log group for NFW alert logs here
   RuleGroupCapacity:
     Type: Number
     MinValue: 1
@@ -18,19 +19,26 @@ Parameters:
     Description: Prefix of SID to ensure rules are unique across rule groups. For example, RuleGroupCapacity=1000 and RuleSidPrefix=3 then the first SID is 3000.
   RuleGroupName:
     Type: String
-    Default: AllowedSni
+    Default: StrictAllowListRuleGroup
     Description: Name of the Network Firewall rule group that we generate.
-  AlertMessage:
-    Type: String
-    Default: Allow-Listed-SNI
-    Description: Message used in alert rules.
   CloudWatchMetricsNamespace:
     Type: String
-    Default: SNI
-  Timestamp:
+    Default: NetworkFirewallDomainMetrics
+    Description: The namespace for the CloudWatch metrics.
+  RateInMinutes:
+    Type: Number
+    MinValue: 2 # Minimum value must be greater than 1, since the EventRule ScheduleExpression uses "minutes" instead of "minute"
+    Default: 60
+    Description: The rate (in minutes) at which the Lambda function will be invoked to update the Network Firewall rule group. This value must be greater than 1. (Default is every 60 minutes)
+  AlertMessage:
     Type: String
-    Default: 1
-    Description: "Optional: update this to forces Lambda to update code"
+    Default: Allow-Listed-Domain
+    Description: Message used in alert rules.
+  WildcardDomainMinimum:
+    Type: Number
+    Default: 15
+    Description: Minimum number of subdomains reached before a wildcard rule is added to allow all subdomains for the corresponding domain. (Default is 15) 
+
 Resources:
 
   RuleGroup:
@@ -42,7 +50,7 @@ Resources:
       RuleGroup:
         RulesSource:
           # Rule groups can't be empty; this default rule gets replaced
-          RulesString: !Sub "pass tls $HOME_NET any -> $EXTERNAL_NET any (sid:${Timestamp};)"
+          RulesString: !Sub "#THIS RULE GROUP WILL BE UPDATED EVERY ${RateInMinutes} MINUTES"
         StatefulRuleOptions:
           RuleOrder: STRICT_ORDER
       Type: STATEFUL
@@ -52,18 +60,24 @@ Resources:
     Properties:
       BillingMode: PAY_PER_REQUEST
       AttributeDefinitions:
-        - AttributeName: fqdn
+        - AttributeName: Hostname
+          AttributeType: S
+        - AttributeName: Protocol
           AttributeType: S
       KeySchema:
-        - AttributeName: fqdn
+        - AttributeName: Hostname
           KeyType: HASH
+        - AttributeName: Protocol
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
 
   EventRule:
     Type: AWS::Events::Rule
     Properties:
       Name: !Ref RuleGroupUpdaterFunction
       Description: Invokes Lambda function to refresh NFW rule group
-      ScheduleExpression: rate(1 minute)
+      ScheduleExpression: !Sub 'rate(${RateInMinutes} minutes)'
       State: ENABLED
       Targets:
         - Arn: !GetAtt RuleGroupUpdaterFunction.Arn
@@ -83,7 +97,7 @@ Resources:
     Properties:
       DestinationArn: !GetAtt RuleGroupUpdaterFunction.Arn
       FilterName: !Ref RuleGroupUpdaterFunction
-      FilterPattern: '{ ($.event.app_proto = "tls") && ($.event.proto = "TCP") && ($.event.dest_port = 443) }'
+      FilterPattern: '{ ($.event.app_proto = "tls" && $.event.proto = "TCP" && $.event.dest_port = 443) || ($.event.app_proto = "http" && $.event.proto = "TCP" && $.event.dest_port = 80) }'
       LogGroupName: !Ref NetworkFirewallLogGroupName
 
   SubscriptionFilterPermission:
@@ -92,6 +106,7 @@ Resources:
       FunctionName: !GetAtt RuleGroupUpdaterFunction.Arn
       Action: lambda:InvokeFunction
       Principal: logs.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
 
   RuleGroupUpdaterFunction:
     Type: AWS::Lambda::Function
@@ -102,66 +117,71 @@ Resources:
       Code:
         ZipFile: |
           import boto3, json, os, base64, gzip, datetime, math
+          from collections import defaultdict
 
           ddb = boto3.client("dynamodb")
           nfw = boto3.client("network-firewall")
+          ec2 = boto3.client("ec2")
           cw = boto3.client("cloudwatch")
-
           DDB_TABLE_NAME = os.getenv("DDB_TABLE_NAME")
           RULE_GROUP_ARN = os.getenv("RULE_GROUP_ARN")
+          WILDCARD_DOMAIN_MINIMUM = int(os.getenv("WILDCARD_DOMAIN_MINIMUM"))
           MAX_RULES = int(os.getenv("MAX_RULES"))
           RULE_SID_PREFIX = int(os.getenv("RULE_SID_PREFIX"))
           ALERT_MESSAGE = os.getenv("ALERT_MESSAGE")
           CW_METRICS_NAMESPACE = os.getenv("CW_METRICS_NAMESPACE")
 
-          ALERT_TEMPLATE = 'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"{message}"; tls.sni; content:"{fqdn}"; startswith; nocase; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{flows}; sid:{sid};)'
-          PASS_TEMPLATE = 'pass tls $HOME_NET any -> $EXTERNAL_NET any (tls.sni; content:"{fqdn}"; startswith; nocase; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{flows}; sid:{sid};)'
+          ALERT_TEMPLATE_TLS = 'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"{message} unique_clients: {clients}, total_hits:{requests}"; tls.sni; content:"{hostname}"; startswith; nocase; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{sid};)'
+          PASS_TEMPLATE_TLS = 'pass tls $HOME_NET any -> $EXTERNAL_NET any (tls.sni; content:"{hostname}"; startswith; nocase; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{sid};)'
 
-          def get_fqdn_stats() -> dict:
-              fqdn_stats = {}
+          ALERT_TEMPLATE_HTTP = 'alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"{message}  unique_clients: {clients}, total_hits:{requests}"; http.host; content:"{hostname}"; startswith; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{sid};)'
+          PASS_TEMPLATE_HTTP = 'pass http $HOME_NET any -> $EXTERNAL_NET any (http.host; content:"{hostname}"; startswith; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{sid};)'
+
+          def get_hostname_stats() -> dict:
+              hostname_stats = {}
               result = ddb.scan(
-                  TableName=DDB_TABLE_NAME, ProjectionExpression="fqdn,source_ips,flows"
+                  TableName=DDB_TABLE_NAME,
+                  ProjectionExpression="Hostname, Protocol, #SourceIPs, #RequestsToDomain, #UniqueSourceIPCount, #LastUpdatedTimestamp, #InstanceIDs",
+                  ExpressionAttributeNames={
+                      "#SourceIPs": "Source IPs",
+                      "#RequestsToDomain": "Requests to Domain",
+                      "#UniqueSourceIPCount": "Unique Source IP Count",
+                      "#LastUpdatedTimestamp": "Last Updated Timestamp",
+                      "#InstanceIDs": "Instance IDs"
+                  }
               )
               for item in result["Items"]:
-                  fqdn = item["fqdn"]["S"]
+                  hostname = item["Hostname"]["S"]
+                  protocol = item["Protocol"]["S"]
                   stats = {
-                      "source_ips": set(item["source_ips"]["SS"]),
-                      "flows": int(item["flows"]["N"]),
+                      "Source IPs": set(item["Source IPs"]["SS"]),
+                      "Requests to Domain": int(item.get("Requests to Domain", {}).get("N", 0)),
+                      "Unique Source IP Count": len(set(item["Source IPs"]["SS"])),
+                      "Last Updated Timestamp": item["Last Updated Timestamp"]["N"],
+                      "Instance IDs": set(item.get("Instance IDs", {}).get("SS", []))
                   }
-                  fqdn_stats[fqdn] = stats
+                  hostname_stats[(hostname, protocol)] = stats
 
-              return fqdn_stats
-
-
-          def update_statistics(alert_json) -> None:
-              source_ip = alert_json["event"]["src_ip"]
-              domain = alert_json["event"]["tls"].get("sni", None)
-              if not domain:
-                  print("update_statistics(): tls sni not found")
-                  return
-
-              params = {
-                  "TableName": DDB_TABLE_NAME,
-                  "Key": {"fqdn": {"S": domain}},
-                  "UpdateExpression": "ADD source_ips :source_ips, flows :one",
-                  "ExpressionAttributeValues": {
-                      ":source_ips": {"SS": [source_ip]},
-                      ":one": {"N": "1"},
-                  },
-              }
-              ddb.update_item(**params)
-
+              return hostname_stats
 
           def update_metrics(alert_json) -> None:
-              domain = alert_json["event"]["tls"].get("sni", None)
-              if not domain:
-                  print("update_metrics(): tls sni not found")
-                  return
-
-              firewall_name = alert_json["firewall_name"]
+              protocol = alert_json["event"]["app_proto"]
               timestamp = alert_json["event"]["timestamp"]
               timestamp_dt = datetime.datetime.fromisoformat(timestamp)
-              #timestamp_millis = int(timestamp_dt.timestamp() * 1000)
+              firewall_name = alert_json["firewall_name"]
+
+              if protocol == "tls":
+                  hostname = alert_json["event"]["tls"].get("sni", None)
+              elif protocol == "http":
+                  hostname = alert_json["event"]["http"].get("hostname", None)
+              else:
+                  print(f"Unknown protocol: {protocol}")
+                  return
+
+              if not hostname:
+                  print("Hostname not found")
+                  return
+
               metrics = [
                   {
                       "MetricName": "Flows",
@@ -172,7 +192,11 @@ Resources:
                           },
                           {
                               "Name": "Domain",
-                              "Value": domain
+                              "Value": hostname
+                          },
+                          {
+                              "Name": "Protocol",
+                              "Value": protocol
                           }
                       ],
                       "Value": 1,
@@ -183,79 +207,262 @@ Resources:
               ]
               cw.put_metric_data(Namespace=CW_METRICS_NAMESPACE, MetricData=metrics)
 
+          def process_alert_log(alert_json) -> None:
+              source_ip = alert_json["event"]["src_ip"]
+              protocol = alert_json["event"]["app_proto"]
+              unix_timestamp = str(alert_json["event_timestamp"])
+
+              if protocol == "tls":
+                  hostname = alert_json["event"]["tls"].get("sni", None)
+              elif protocol == "http":
+                  hostname = alert_json["event"]["http"].get("hostname", None)
+              else:
+                  print(f"Unknown protocol: {protocol}")
+                  return
+
+              if not hostname:
+                  print("Hostname not found")
+                  return
+
+              instance_id = get_instance_id_from_ip(source_ip)  # Get instance ID from Source IP
+
+              # First update: ADD Source IPs
+              response = ddb.update_item(
+                  TableName=DDB_TABLE_NAME,
+                  Key={"Hostname": {"S": hostname}, "Protocol": {"S": protocol}},
+                  UpdateExpression="ADD #SourceIPs :source_ips",
+                  ExpressionAttributeNames={
+                      "#SourceIPs": "Source IPs",
+                  },
+                  ExpressionAttributeValues={
+                      ":source_ips": {"SS": [source_ip]},
+                  },
+                  ReturnValues="ALL_NEW"
+              )
+
+              # Second update: ADD Instance IDs
+              if instance_id:
+                  ddb.update_item(
+                      TableName=DDB_TABLE_NAME,
+                      Key={"Hostname": {"S": hostname}, "Protocol": {"S": protocol}},
+                      UpdateExpression="ADD #InstanceIDs :instance_id",
+                      ExpressionAttributeNames={
+                          "#InstanceIDs": "Instance IDs"
+                      },
+                      ExpressionAttributeValues={
+                          ":instance_id": {"SS": [instance_id]}
+                      }
+                  )
+
+              if "Attributes" in response:
+                  source_ips = set(response["Attributes"].get("Source IPs", {}).get("SS", []))
+                  last_updated_timestamp = response["Attributes"].get("Last Updated Timestamp", {}).get("N", unix_timestamp)
+
+                  if "Requests to Domain" not in response["Attributes"]:
+                      print(f"Creating new 'Requests to Domain' entry for {hostname}, {protocol}")
+                      ddb.update_item(
+                          TableName=DDB_TABLE_NAME,
+                          Key={"Hostname": {"S": hostname}, "Protocol": {"S": protocol}},
+                          UpdateExpression="SET #RequestsToDomain = :requests, #LastUpdatedTimestamp = :timestamp",
+                          ExpressionAttributeNames={
+                              "#RequestsToDomain": "Requests to Domain",
+                              "#LastUpdatedTimestamp": "Last Updated Timestamp",
+                          },
+                          ExpressionAttributeValues={
+                              ":requests": {"N": "1"},
+                              ":timestamp": {"N": unix_timestamp},
+                          },
+                      )
+                  else:
+                      existing_requests = int(response["Attributes"]["Requests to Domain"]["N"])
+                      if source_ip not in source_ips or str(unix_timestamp) != last_updated_timestamp:
+                          new_requests = existing_requests + 1
+                          ddb.update_item(
+                              TableName=DDB_TABLE_NAME,
+                              Key={"Hostname": {"S": hostname}, "Protocol": {"S": protocol}},
+                              UpdateExpression="SET #RequestsToDomain = :requests, #LastUpdatedTimestamp = :timestamp ADD #SourceIPs :source_ip",
+                              ExpressionAttributeNames={
+                                  "#RequestsToDomain": "Requests to Domain",
+                                  "#LastUpdatedTimestamp": "Last Updated Timestamp",
+                                  "#SourceIPs": "Source IPs"
+                              },
+                              ExpressionAttributeValues={
+                                  ":requests": {"N": str(new_requests)},
+                                  ":timestamp": {"N": unix_timestamp},
+                                  ":source_ip": {"SS": [source_ip]}
+                              },
+                          )
+                      else:
+                          print(f"Skipping 'Requests to Domain' update for {hostname}, {protocol} (duplicate log)")
+
+                  print(f"Updating 'Unique Source IP Count' for {hostname}, {protocol}")
+                  ddb.update_item(
+                      TableName=DDB_TABLE_NAME,
+                      Key={"Hostname": {"S": hostname}, "Protocol": {"S": protocol}},
+                      UpdateExpression="SET #UniqueSourceIPCount = :workloads",
+                      ExpressionAttributeNames={
+                          "#UniqueSourceIPCount": "Unique Source IP Count"
+                      },
+                      ExpressionAttributeValues={":workloads": {"N": str(len(source_ips))}},
+                  )
+
           def process_logs(event) -> None:
               data = event["awslogs"]["data"]
               decoded_event = json.loads(gzip.decompress(base64.b64decode(data)))
-              log_events = decoded_event["logEvents"]
-              print(f"processing {len(log_events)} log events")
               for log_event in decoded_event["logEvents"]:
                   body = log_event["message"]
                   alert_json = json.loads(body)
-                  update_statistics(alert_json)
+                  process_alert_log(alert_json)
                   update_metrics(alert_json)
-
-
+                  
           def update_rule_group(event) -> None:
-              # Get FQDN stats from DynamoDB table
+              # Get hostname stats from DynamoDB table
+              hostname_stats = get_hostname_stats()
 
-              fqdn_stats = get_fqdn_stats()
-              # print(json.dumps(fqdn_stats, default=str))
-
-              if not fqdn_stats:
-                  print("no SNI logs have been processed")
+              if not hostname_stats:
+                  print("no hostname logs have been processed")
                   return
-              print(f"total SNI domains: {len(fqdn_stats)} rules")
 
               # Generate a list of Suricata rules from stats
-
-              def flows(fqdn) -> int:
-                  return fqdn_stats[fqdn]['flows']
-
-              sorted_fqdns = sorted(fqdn_stats.keys(), key=flows, reverse=True)
-              top_fqdns = sorted_fqdns[:MAX_RULES]
-              print(f"creating rules for {len(top_fqdns)} domains")
+              sorted_hostnames = sorted(hostname_stats.keys(), key=lambda x: hostname_stats[x]['Requests to Domain'], reverse=True)
+              top_hostnames = sorted_hostnames[:MAX_RULES]
 
               # Determine max length of SID so we can pad with zeros.
-              # e.g. if rule capacity is 900 or 1000, sid_width is 3
-
               sid_width = math.ceil(math.log10(MAX_RULES))
 
               i = 0
               rules = []
-              for fqdn in top_fqdns:
-                  stats = fqdn_stats[fqdn]
 
-                  sid = str(i).zfill(sid_width)
-                  params = {
-                      "fqdn": fqdn,
-                      "clients": len(stats["source_ips"]),
-                      "flows": stats["flows"],
-                      "sid": f"{RULE_SID_PREFIX}{sid}",
-                      "message": ALERT_MESSAGE,
-                  }
-                  rules.append(ALERT_TEMPLATE.format(**params))
-                  i += 1
+              # Add TLS wildcard rules
+              rules.append("# TLS Wildcard Rules")
 
-                  sid = str(i).zfill(sid_width)
-                  params = {
-                      "fqdn": fqdn,
-                      "clients": len(stats["source_ips"]),
-                      "flows": stats["flows"],
-                      "sid": f"{RULE_SID_PREFIX}{sid}",
-                  }
-                  rules.append(PASS_TEMPLATE.format(**params))
-                  i += 1
+              # Process TLS wildcard rules
+              tls_domain_counts = defaultdict(int)
+              tls_domain_stats = defaultdict(lambda: {"Source IPs": set(), "Requests to Domain": 0})
+              for hostname, protocol in top_hostnames:
+                  if protocol == "tls":
+                      domain = ".".join(hostname.split(".")[-2:])
+                      tls_domain_counts[domain] += 1
+                      tls_domain_stats[domain]["Source IPs"].update(hostname_stats[(hostname, protocol)]["Source IPs"])
+                      tls_domain_stats[domain]["Requests to Domain"] += hostname_stats[(hostname, protocol)]["Requests to Domain"]
+
+              for domain, count in sorted(tls_domain_counts.items(), key=lambda x: x[1], reverse=True):
+                  if count >= WILDCARD_DOMAIN_MINIMUM:
+                      clients = len(tls_domain_stats[domain]["Source IPs"])
+                      requests = tls_domain_stats[domain]["Requests to Domain"]
+
+                      # TLS Alert rule
+                      sid = str(i).zfill(sid_width)
+                      wildcard_rule = f'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"{ALERT_MESSAGE},  unique_clients: {clients}, total_hits:{requests}"; tls.sni; content:\".{domain}\"; endswith; nocase; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{RULE_SID_PREFIX}{sid};)'
+                      rules.append(wildcard_rule)
+                      i += 1
+
+                      # TLS Pass rule
+                      sid = str(i).zfill(sid_width)
+                      wildcard_rule = f"pass tls $HOME_NET any -> $EXTERNAL_NET any (tls.sni; content:\".{domain}\"; endswith; nocase; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{RULE_SID_PREFIX}{sid};)"
+                      rules.append(wildcard_rule)
+                      i += 1
+
+              # Add HTTP wildcard rules
+              rules.extend(["", ""])
+              rules.append("# HTTP Wildcard Rules")
+
+              # Process HTTP wildcard rules
+              http_domain_counts = defaultdict(int)
+              http_domain_stats = defaultdict(lambda: {"Source IPs": set(), "Requests to Domain": 0})
+              for hostname, protocol in top_hostnames:
+                  if protocol == "http":
+                      domain = ".".join(hostname.split(".")[-2:])
+                      http_domain_counts[domain] += 1
+                      http_domain_stats[domain]["Source IPs"].update(hostname_stats[(hostname, protocol)]["Source IPs"])
+                      http_domain_stats[domain]["Requests to Domain"] += hostname_stats[(hostname, protocol)]["Requests to Domain"]
+
+              for domain, count in sorted(http_domain_counts.items(), key=lambda x: x[1], reverse=True):
+                  if count >= WILDCARD_DOMAIN_MINIMUM:
+                      clients = len(http_domain_stats[domain]["Source IPs"])
+                      requests = http_domain_stats[domain]["Requests to Domain"]
+
+                      # HTTP Alert rule
+                      sid = str(i).zfill(sid_width)
+                      wildcard_rule = f'alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"{ALERT_MESSAGE},  unique_clients: {clients}, total_hits:{requests}"; http.host; content:\".{domain}\"; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{RULE_SID_PREFIX}{sid};)'
+                      rules.append(wildcard_rule)
+                      i += 1
+
+                      # HTTP Pass rule
+                      sid = str(i).zfill(sid_width)
+                      wildcard_rule = f"pass http $HOME_NET any -> $EXTERNAL_NET any (http.host; content:\".{domain}\"; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{RULE_SID_PREFIX}{sid};)"
+                      rules.append(wildcard_rule)
+                      i += 1
+
+              # Add TLS specific rules
+              rules.extend(["", ""])
+              rules.append("# TLS Specific Rules")
+
+              for hostname, protocol in sorted(top_hostnames, key=lambda x: hostname_stats[x]['Requests to Domain'], reverse=True):
+                  if protocol == "tls":
+                      stats = hostname_stats[(hostname, protocol)]
+
+                      sid = str(i).zfill(sid_width)
+                      params = {
+                          "hostname": hostname,
+                          "clients": stats["Unique Source IP Count"],
+                          "requests": stats["Requests to Domain"],
+                          "sid": f"{RULE_SID_PREFIX}{sid}",
+                          "message": ALERT_MESSAGE,
+                      }
+                      tls_alert_rule = ALERT_TEMPLATE_TLS.format(**params)
+                      rules.append(tls_alert_rule)
+                      i += 1
+
+                      sid = str(i).zfill(sid_width)
+                      params = {
+                          "hostname": hostname,
+                          "clients": stats["Unique Source IP Count"],
+                          "requests": stats["Requests to Domain"],
+                          "sid": f"{RULE_SID_PREFIX}{sid}",
+                      }
+                      tls_pass_rule = PASS_TEMPLATE_TLS.format(**params)
+                      rules.append(tls_pass_rule)
+                      i += 1
+
+              # Add HTTP specific rules
+              rules.extend(["", ""])
+              rules.append("# HTTP Specific Rules")
+
+              for hostname, protocol in sorted(top_hostnames, key=lambda x: hostname_stats[x]['Requests to Domain'], reverse=True):
+                  if protocol == "http":
+                      stats = hostname_stats[(hostname, protocol)]
+
+                      sid = str(i).zfill(sid_width)
+                      params = {
+                          "hostname": hostname,
+                          "clients": stats["Unique Source IP Count"],
+                          "requests": stats["Requests to Domain"],
+                          "sid": f"{RULE_SID_PREFIX}{sid}",
+                          "message": ALERT_MESSAGE,
+                      }
+                      http_alert_rule = ALERT_TEMPLATE_HTTP.format(**params)
+                      rules.append(http_alert_rule)
+                      i += 1
+
+                      sid = str(i).zfill(sid_width)
+                      params = {
+                          "hostname": hostname,
+                          "clients": stats["Unique Source IP Count"],
+                          "requests": stats["Requests to Domain"],
+                          "sid": f"{RULE_SID_PREFIX}{sid}",
+                      }
+                      http_pass_rule = PASS_TEMPLATE_HTTP.format(**params)
+                      rules.append(http_pass_rule)
+                      i += 1
+
+              # Join the rules into a single string
+              rule_string = "\n".join(rules)
 
               # Get UpdateToken so we can update the rule group
-
               rule_group = nfw.describe_rule_group(RuleGroupArn=RULE_GROUP_ARN, Type="STATEFUL")
 
-              # Update the rule group with latest set of rules
-
-              rule_string = "\n".join(rules)
-              print(f"rule string size: {len(rule_string)}")
-              # Note: max rule string size is 2,000,000 bytes
-
+              # Update the rule group with the entire rule string
               params = {
                   "UpdateToken": rule_group["UpdateToken"],
                   "RuleGroupArn": RULE_GROUP_ARN,
@@ -266,17 +473,33 @@ Resources:
                   "Type": "STATEFUL",
                   "EncryptionConfiguration": {"Type": "AWS_OWNED_KMS_KEY"},
               }
-              print(f"UpdateRuleGroup {params=}")
               nfw.update_rule_group(**params)
-
+              
+          def get_instance_id_from_ip(source_ip):
+              try:
+                  response = ec2.describe_instances(Filters=[
+                      {
+                          'Name': 'private-ip-address',
+                          'Values': [source_ip]
+                      }
+                  ])
+                  for reservation in response['Reservations']:
+                      for instance in reservation['Instances']:
+                          return instance['InstanceId']
+              except Exception as e:
+                  print(f"Error getting instance ID for IP {source_ip}: {e}")
+              return None
 
           def handler(event, context) -> None:
               if "awslogs" in event:
                   # CloudWatch Logs
+                  print("Processing CloudWatch Logs event")
                   process_logs(event)
               else:
                   # EventBridge
+                  print("Processing EventBridge event")
                   update_rule_group(event)
+
       Handler: index.handler
       LoggingConfig:
         LogGroup: !Ref RuleGroupUpdaterFunctionLogGroup
@@ -284,16 +507,16 @@ Resources:
       Environment:
         Variables:
           RULE_GROUP_ARN: !GetAtt RuleGroup.RuleGroupArn
+          WILDCARD_DOMAIN_MINIMUM: !Ref WildcardDomainMinimum
           DDB_TABLE_NAME: !Ref FlowStatsTable
           MAX_RULES: !Ref RuleGroupCapacity
           RULE_SID_PREFIX: !Ref RuleSidPrefix
           ALERT_MESSAGE: !Ref AlertMessage
           CW_METRICS_NAMESPACE: !Ref CloudWatchMetricsNamespace
-          TIMESTAMP: !Ref Timestamp  # forces code to update
       ReservedConcurrentExecutions: 2
       Role: !GetAtt RuleGroupUpdaterFunctionRole.Arn
       Runtime: python3.12
-      Timeout: 10
+      Timeout: 20
 
   RuleGroupUpdaterFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -318,7 +541,7 @@ Resources:
   RuleGroupUpdaterFunctionPolicy:
     Type: AWS::IAM::Policy
     Properties:
-      PolicyName: LambdaPolicy
+      PolicyName: NFWAllowListLambdaPolicy
       PolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -338,6 +561,10 @@ Resources:
               - dynamodb:Scan
               - dynamodb:UpdateItem
             Resource: !GetAtt FlowStatsTable.Arn
+          - Effect: Allow
+            Action:
+              - ec2:DescribeInstances # Allows Lambda function to get instance ID from private IP address
+            Resource: '*'
           - Effect: Allow
             Action:
               - cloudwatch:PutMetricData
