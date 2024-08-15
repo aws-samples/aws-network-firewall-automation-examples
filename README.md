@@ -9,6 +9,9 @@ This project consists of CloudFormation Templates and snippets of source code th
 #### Abuse.CH
 * Examples of using URLs hosting IP addresses, hostnames, or Suricata rules from https://abuse.ch
 
+#### AllowListGenerator
+* Solution to automate creating an allow list Suricata stateful rule group for AWS Network Firewall based on HTTP/TLS traffic logs, also provides deep visibility into HTTP/TLS traffic patterns.
+
 #### Alphasoc
 * Examples of blocking using encrypted DNS hosts from https://feeds.alphasoc.net/encrypted_dns.txt
 
