@@ -118,8 +118,12 @@ To remove the resources created by this template, delete the CloudFormation stac
 |------|------|
 |Bryan Van Hook | Solutions Architect III|
 |Lawton Pittenger | Solutions Architect I|
+
+## Significant Contributors
+|Name | Title|
+|------|------|
 |Jesse Lepich | Sr WW Security Specialist SA|
-|Michael Leighty | Sr WW Specialist SA Security|
+|Michael Leighty | Sr WW Security Specialist SA|
 
 ## License
 
