@@ -1,4 +1,5 @@
 import boto3
+import json
 import urllib.request
 from datetime import datetime
 
@@ -51,6 +52,9 @@ def create_rules(rule_group, type_):
     update_rules(rule_group)
 
 def lambda_handler(event, context):
+    if event.get('RequestType') == "Delete":
+        return {'statusCode': 200, 'body': json.dumps('SUCCESS')}
+    
     try:
         params = {
             "Type": "STATEFUL", 
