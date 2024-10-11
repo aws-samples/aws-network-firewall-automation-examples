@@ -19,7 +19,7 @@ Resources:
       RuleGroup:
         RulesSource:
           RulesString: '#This will be updated via the Lambda function'
-      Capacity: 4000
+      Capacity: 8000
       Description: >-
         Used to track a list of Emerging IP Threats from
         https://check.torproject.org/exit-addresses
@@ -65,6 +65,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 14
     DeletionPolicy: Retain
   ScheduledRule: 
     Type: AWS::Events::Rule
@@ -97,8 +98,8 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Role: !GetAtt LambdaExecutionRole.Arn
-      Runtime: nodejs16.x
-      Handler: index.handler
+      Runtime: python3.12
+      Handler: index.lambda_handler
       Timeout: 60
       Description: Used to fetch data from the Emerging Threats IP list and update the associated RuleGroup
       Tags: 
@@ -107,97 +108,85 @@ Resources:
           Value: "TorProjectIPFiltering"
       Code:
         ZipFile: !Sub |
-          var AWS = require("aws-sdk");
-          var response = require('cfn-response');
-          var https = require("https");
-          var listOfIps = [];
+          import boto3
+          import json
+          import urllib.request
+          from datetime import datetime
+          import cfnresponse
 
-          const TorProjectUrl = "https://check.torproject.org/exit-addresses";
+          TOR_PROJECT_URL = "https://check.torproject.org/exit-addresses"
+          RULE_GROUP_ARN = "${StatefulRulegroup.RuleGroupArn}"
 
-          const networkfirewall = new AWS.NetworkFirewall();
+          networkfirewall = boto3.client('network-firewall')
 
-          function fetchIPs() {
-            console.log("Fetching the list of IP addresses...");
-            return new Promise((resolve, reject) => {
+          def fetch_ips():
+              print("Fetching the list of IP addresses...")
+              try:
+                  with urllib.request.urlopen(TOR_PROJECT_URL) as response:
+                      data = response.read().decode('utf-8')
+                  
+                  ip_list = [line.split()[1] for line in data.splitlines() if line.startswith("ExitAddress ")]
+                  print(f"Fetched {len(ip_list)} IP addresses...")
+                  return ip_list
+              except urllib.error.URLError as e:
+                  print(f"Error fetching IP addresses: {e}")
+                  return []
+
+          def update_rules(rule_group):
+              params = rule_group.copy()
+              print(params) # Debug line
+              params['RuleGroupName'] = params['RuleGroupResponse']['RuleGroupName']
+              params['Type'] = params['RuleGroupResponse']['Type']
+              # Remove keys that can't be updated
+              params.pop('ResponseMetadata', None)
+              params.pop('Capacity', None)
+              params.pop('RuleGroupResponse', None)
               
-              let dataString = '';
-              let post_req = https.request(TorProjectUrl, (res) => {
-                res.setEncoding("utf8");
-                res.on('data', chunk => {
-                  dataString += chunk;
-                });
-                res.on('end', () => {
-                  listOfIps = dataString
-                    .split(/\r?\n/)
-                    .filter((line) => line.match(/ExitAddress /))
-                    .map(s => s.split(" ")[1]);
-                  console.log("Fetched " + listOfIps.length + " IP addresses...");
-                  resolve();
-                });
-                res.on('error', (err) => {
-                  reject(err);
-                });
-              });
-              post_req.end();
-            });
-          }
+              print("Updating rules...")
+              try:
+                  networkfirewall.update_rule_group(**params)
+                  print(f"Updated '{params['RuleGroupName']}'.")
+              except Exception as e:
+                  print(f"Error updating the rules for '{params['RuleGroupName']}': {str(e)}")
 
-          let updateRules = async function (ruleGroup) {
-            let params = ruleGroup;
-            delete params.Capacity;
-            params.RuleGroupName = params.RuleGroupResponse.RuleGroupName;
-            params.Type = params.RuleGroupResponse.Type;
-            delete params.RuleGroupResponse;
+          def create_rules(rule_group, type_):
+              ip_list = fetch_ips()
 
-            console.log("Updating rules...");
-            let res = await networkfirewall.updateRuleGroup(params).promise();
-            if (res) {
-              console.log("Updated '" + params.RuleGroupName + "'.");
-            } else {
-              console.log("Error updating the rules for '" + params.RuleGroupName + "'...");
-            }
-            return;
-          };
+              rules_string = f"# Last updated: {datetime.utcnow().isoformat()}\n"
+              rules_string += f"# Using a list of {len(ip_list)} IP addresses\n"
+              
+              for index, ip in enumerate(ip_list):
+                  rules_string += f"{type_} ip {ip} any -> any any (msg:\"{type_} emerging threats traffic from {ip}\"; rev:1; sid:55{index};)\n"
+                  rules_string += f"{type_} ip any any -> {ip} any (msg:\"{type_} emerging threats traffic to {ip}\"; rev:1; sid:66{index};)\n"
 
-          let createRules = async function (ruleGroup, type) {
-            if (listOfIps.length == 0) {
-              await fetchIPs();
-            } else {
-              console.log("Using recently fetched list of " + listOfIps.length + " IP addresses...");
-            }
+              rule_group['RuleGroup']['RulesSource']['RulesString'] = rules_string
+              update_rules(rule_group)
 
-            let rulesString = "# Last updated: " + new Date().toUTCString() + "\n";
-            rulesString += "# Using a list of " + listOfIps.length + " IP addresses\n";
-            
-            listOfIps.forEach((ip, index) => {
-              rulesString += type + ' ip ' + ip + ' any -> any any (msg:"' + type + ' emerging threats traffic from ' + ip + '"; rev:1; sid:55' + index + ';)\n';
-              rulesString += type + ' ip any any -> ' + ip + ' any (msg:"' + type + ' emerging threats traffic to ' + ip + '"; rev:1; sid:66' + index + ';)\n';
-            });
+          def lambda_handler(event, context):
+              if event.get('RequestType') == "Delete":
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'message': 'Function executed successfully'})
+                  return {'statusCode': 200, 'body': json.dumps('SUCCESS')}
 
-            ruleGroup.RuleGroup.RulesSource.RulesString = rulesString;
-            await updateRules(ruleGroup);
+              try:
+                  params = {
+                      "Type": "STATEFUL", 
+                      "RuleGroupArn": RULE_GROUP_ARN
+                  }
+                  
+                  print("Searching for Rule Groups...")
+                  res = networkfirewall.describe_rule_group(**params)
+                  if 'RuleGroupResponse' in res:
+                      print("Found Rule Group...")
+                      create_rules(res, "drop")
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {'message': 'Function executed successfully'})
+                  else:
+                      print("ERROR: No matching Rule Group found...")
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {'message': 'No matching Rule Group found'})
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'message': f'Error: {str(e)}'})
 
-            return;
-          };
-
-          exports.handler = async (event, context) => {
-            if (event.RequestType == "Delete") {
-                await response.send(event, context, "SUCCESS");
-                return;
-            }
-
-            var params = {Type: "STATEFUL", RuleGroupArn: '${StatefulRulegroup.RuleGroupArn}'};
-            
-            console.log("Searching for Rule Groups...");
-            let res = await networkfirewall.describeRuleGroup(params).promise();
-            if (res.RuleGroupResponse) {
-              console.log("Found Rule Group...");
-              await createRules(res,"${RuleGroupAction}");
-              if (event.ResponseURL) await response.send(event, context, response.SUCCESS);
-            } else {
-              console.log("ERROR: No matching Rule Group found...");
-              if (event.ResponseURL) await response.send(event, context, response.FAILED);
-            }
-            
-            return;
-          };
+              return {
+                  'statusCode': 200,
+                  'body': 'Function executed successfully'
+              }
