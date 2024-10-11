@@ -65,6 +65,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 14
     DeletionPolicy: Retain
   ScheduledRule: 
     Type: AWS::Events::Rule
