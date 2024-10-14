@@ -98,8 +98,6 @@ def update_rule_group(new_rule):
         return False
 
 def lambda_handler(event, context):
-    if event.get('RequestType') == "Delete":
-        return {'statusCode': 200, 'body': json.dumps('SUCCESS')}
     try:
         print(f"Fetch a list of domains from: {SOURCE_ARN}")
         domains = get_domains(SOURCE_ARN)
