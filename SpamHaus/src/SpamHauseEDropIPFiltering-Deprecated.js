@@ -1,3 +1,8 @@
+// DEPRECATED - but left for historical context
+// This was based on Node 14 and will not work with Node 16 or greater
+// Node 16 or great also requires v3 of the AWS SDK
+
+//Additionally the drop.txt and edrop.txt files have been merged into the drop.txt link
 var AWS = require("aws-sdk");
 var https = require("https");
 var listOfIps = [];
