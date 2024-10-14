@@ -94,6 +94,7 @@ Resources:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
+      RetentionInDays: 14
     DeletionPolicy: Retain
   PermissionForEventsToInvokeLambda: 
     Type: AWS::Lambda::Permission
