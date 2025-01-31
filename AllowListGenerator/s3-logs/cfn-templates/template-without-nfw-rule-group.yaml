@@ -1,0 +1,763 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  LogBucket:
+    Type: String
+    Description: Name of S3 bucket that stores the AWS Network Firewall alert logs.
+  LogBucketPrefix1:
+    Type: String
+    Default: "/"
+    Description: "First S3 log prefix to monitor"
+  LogBucketPrefix2:
+    Type: String
+    Default: ""
+    Description: "Second S3 log prefix to monitor (optional)"
+  LogBucketPrefix3:
+    Type: String
+    Default: ""
+    Description: "Third S3 log prefix to monitor (optional)"
+  RuleSidPrefix:
+    Type: Number
+    Default: 1
+    Description: Prefix of SID
+  RateInMinutes:
+    Type: Number
+    MinValue: 2
+    Default: 60
+    Description: The rate (in minutes) at which the Lambda function will be invoked to update the Network Firewall rule group. This value must be greater than 1. (Default is every 60 minutes)
+  AlertMessage:
+    Type: String
+    Default: Allow-Listed-Domain
+    Description: Message used in alert rules.
+  WildcardDomainMinimum:
+    Type: Number
+    Default: 15
+    Description: Minimum number of subdomains reached before a wildcard rule is added to allow all subdomains for the corresponding domain. (Default is 15)
+
+Conditions:
+  HasPrefix2: !Not [!Equals [!Ref LogBucketPrefix2, '']]
+  HasPrefix3: !Not [!Equals [!Ref LogBucketPrefix3, '']]
+
+Resources:
+
+  LambdaInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      FunctionName: !GetAtt RuleGroupUpdaterFunction.Arn
+      Action: 'lambda:InvokeFunction'
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref 'AWS::AccountId'
+      SourceArn: !Sub 'arn:aws:s3:::${LogBucket}'
+
+  LambdaIAMRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetBucketNotification'
+                  - 's3:PutBucketNotification'
+                Resource: !Sub 'arn:aws:s3:::${LogBucket}'
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource: 'arn:aws:logs:*:*:*'
+
+  CustomResourceLambdaFunction:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaIAMRole.Arn
+      Code:
+        ZipFile: |
+          from __future__ import print_function
+          import json
+          import boto3
+          import cfnresponse
+
+          SUCCESS = "SUCCESS"
+          FAILED = "FAILED"
+
+          print('Loading function')
+          s3 = boto3.resource('s3')
+
+          def lambda_handler(event, context):
+              print("Received event: " + json.dumps(event, indent=2))
+              responseData={}
+              try:
+                  if event['RequestType'] == 'Delete':
+                      print("Request Type:",event['RequestType'])
+                      Bucket=event['ResourceProperties']['Bucket']
+                      delete_notification(Bucket)
+                      print("Sending response to custom resource after Delete")
+                  elif event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                      print("Request Type:",event['RequestType'])
+                      LambdaArn=event['ResourceProperties']['LambdaArn']
+                      Bucket=event['ResourceProperties']['Bucket']
+                      Prefixes=event['ResourceProperties'].get('Prefixes', [])  # Get prefixes from properties
+                      add_notification(LambdaArn, Bucket, Prefixes)
+                      responseData={'Bucket':Bucket}
+                      print("Sending response to custom resource")
+                  responseStatus = 'SUCCESS'
+              except Exception as e:
+                  print('Failed to process:', e)
+                  responseStatus = 'FAILED'
+                  responseData = {'Failure': str(e)}
+              cfnresponse.send(event, context, responseStatus, responseData, "CustomResourcePhysicalID")
+
+          def add_notification(LambdaArn, Bucket, Prefixes):
+              bucket_notification = s3.BucketNotification(Bucket)
+              
+              # Filter out empty strings and create list of valid prefixes
+              valid_prefixes = [prefix for prefix in Prefixes if prefix.strip()]
+              
+              # If no valid prefixes specified, add notification for entire bucket
+              if not valid_prefixes:
+                  configuration = {
+                      'LambdaFunctionConfigurations': [
+                          {
+                              'LambdaFunctionArn': LambdaArn,
+                              'Events': ['s3:ObjectCreated:*']
+                          }
+                      ]
+                  }
+              else:
+                  # Create configuration with filters for each valid prefix
+                  lambda_configurations = []
+                  for prefix in valid_prefixes:
+                      lambda_configurations.append({
+                          'LambdaFunctionArn': LambdaArn,
+                          'Events': ['s3:ObjectCreated:*'],
+                          'Filter': {
+                              'Key': {
+                                  'FilterRules': [
+                                      {
+                                          'Name': 'prefix',
+                                          'Value': prefix
+                                      }
+                                  ]
+                              }
+                          }
+                      })
+                  
+                  configuration = {
+                      'LambdaFunctionConfigurations': lambda_configurations
+                  }
+              
+              response = bucket_notification.put(
+                  NotificationConfiguration=configuration
+              )
+              print(f"Put request completed with configuration: {json.dumps(configuration, indent=2)}")
+
+          def delete_notification(Bucket):
+              bucket_notification = s3.BucketNotification(Bucket)
+              response = bucket_notification.put(
+                  NotificationConfiguration={}
+              )
+              print("Delete request completed....")
+      Runtime: python3.11
+      Timeout: 50
+
+  LambdaTrigger:
+    Type: 'Custom::LambdaTrigger'
+    DependsOn: LambdaInvokePermission
+    Properties:
+      ServiceToken: !GetAtt CustomResourceLambdaFunction.Arn
+      LambdaArn: !GetAtt RuleGroupUpdaterFunction.Arn
+      Bucket: !Ref LogBucket
+      Prefixes: !Split 
+        - ','
+        - !Join
+          - ','
+          - - !Ref LogBucketPrefix1
+            - !If [HasPrefix2, !Ref LogBucketPrefix2, '']
+            - !If [HasPrefix3, !Ref LogBucketPrefix3, '']
+
+  # S3 Bucket to store the rules
+  RulesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LoggingBucket
+        LogFilePrefix: access-logs
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: Rules-Bucket
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  RulesBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref RulesBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 's3:*'
+            Effect: Deny
+            Resource: 
+              - !Sub arn:aws:s3:::${RulesBucket}/*
+              - !Sub arn:aws:s3:::${RulesBucket}
+            Principal: "*"
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # S3 Bucket to store the access logs for the RulesBucket
+  LoggingBucket: 
+    Type: "AWS::S3::Bucket"
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  LoggingBucketPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref LoggingBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Action:
+              - 's3:PutObject'
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Resource: 
+              - !Sub arn:aws:s3:::${LoggingBucket}/*
+          - Action:
+              - 's3:*'
+            Effect: Deny
+            Resource: 
+              - !Sub arn:aws:s3:::${LoggingBucket}/*
+              - !Sub arn:aws:s3:::${LoggingBucket}
+            Principal: "*"
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  FlowStatsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: Hostname
+          AttributeType: S
+        - AttributeName: Protocol
+          AttributeType: S
+        - AttributeName: FirewallName
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Hostname
+          KeyType: HASH
+        - AttributeName: Protocol
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: FirewallNameIndex
+          KeySchema:
+            - AttributeName: FirewallName
+              KeyType: HASH
+            - AttributeName: Protocol
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+
+  EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref RuleGroupUpdaterFunction
+      Description: Invokes Lambda function to refresh NFW rule group
+      ScheduleExpression: !Sub 'rate(${RateInMinutes} minutes)'
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt RuleGroupUpdaterFunction.Arn
+          Id: RuleGroupUpdater
+
+  EventRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt RuleGroupUpdaterFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EventRule.Arn
+
+  RuleGroupUpdaterFunction:
+    Type: AWS::Lambda::Function
+    DependsOn:
+      - RuleGroupUpdaterFunctionPolicy
+      - FlowStatsTable
+    Properties:
+      Code:
+        ZipFile: |
+          import boto3
+          import gzip
+          import json
+          import os
+          import math
+          from collections import defaultdict
+
+          ddb = boto3.client("dynamodb")
+          s3 = boto3.client("s3")
+
+          DDB_TABLE_NAME = os.getenv("DDB_TABLE_NAME")
+          WILDCARD_DOMAIN_MINIMUM = int(os.getenv("WILDCARD_DOMAIN_MINIMUM"))
+          MAX_RULES = 30000
+          RULE_SID_PREFIX = int(os.getenv("RULE_SID_PREFIX"))
+          ALERT_MESSAGE = os.getenv("ALERT_MESSAGE")
+          RULES_BUCKET_NAME = os.getenv("RULES_BUCKET_NAME")
+
+          ALERT_TEMPLATE_TLS = 'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"{message} unique_clients: {clients}, total_hits:{requests}"; tls.sni; content:"{hostname}"; startswith; nocase; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{sid};)'
+          PASS_TEMPLATE_TLS = 'pass tls $HOME_NET any -> $EXTERNAL_NET any (tls.sni; content:"{hostname}"; startswith; nocase; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{sid};)'
+
+          ALERT_TEMPLATE_HTTP = 'alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"{message}  unique_clients: {clients}, total_hits:{requests}"; http.host; content:"{hostname}"; startswith; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{sid};)'
+          PASS_TEMPLATE_HTTP = 'pass http $HOME_NET any -> $EXTERNAL_NET any (http.host; content:"{hostname}"; startswith; endswith; flow:to_server; metadata: unique_clients,{clients},total_hits,{requests}; sid:{sid};)'
+
+          def get_hostname_stats() -> dict:
+              print("Retrieving hostname stats from DynamoDB...")
+              hostname_stats = {}
+              result = ddb.scan(
+                  TableName=DDB_TABLE_NAME,
+                  ProjectionExpression="Hostname, Protocol, FirewallName, #SourceIPs, #RequestsToDomain, #UniqueSourceIPCount, #LastUpdatedTimestamp",
+                  ExpressionAttributeNames={
+                      "#SourceIPs": "Source IPs",
+                      "#RequestsToDomain": "Requests to Domain",
+                      "#UniqueSourceIPCount": "Unique Source IP Count",
+                      "#LastUpdatedTimestamp": "Last Updated Timestamp"
+                  }
+              )
+              for item in result["Items"]:
+                  hostname = item["Hostname"]["S"]
+                  protocol = item["Protocol"]["S"]
+                  firewall_name = item["FirewallName"]["S"]
+                  
+                  stats = {
+                      "Source IPs": set(item["Source IPs"]["SS"]),
+                      "Requests to Domain": int(item.get("Requests to Domain", {}).get("N", 0)),
+                      "Unique Source IP Count": len(set(item["Source IPs"]["SS"])),
+                      "Last Updated Timestamp": item["Last Updated Timestamp"]["N"]
+                  }
+                  hostname_stats[(hostname, protocol, firewall_name)] = stats
+
+              print("Retrieved hostname stats from DynamoDB.")
+              return hostname_stats
+
+          def process_logs(log_data):
+              print("Processing log data...")
+              log_entries = log_data.strip().split('\n')
+
+              for log_entry in log_entries:
+                  if log_entry:
+                      log_data = json.loads(log_entry)
+                      print(f"Processing log entry: {log_entry}")
+
+                      if "event" in log_data and "app_proto" in log_data["event"]:
+                          if log_data["event"]["app_proto"] in ["tls", "http"]:
+                              print("Valid TLS or HTTP log entry. Processing...")
+                              process_alert_log(log_data)
+                          else:
+                              print(f"Skipping log entry with unsupported protocol: {log_data['event']['app_proto']}")
+                      else:
+                          print(f"Skipping log entry without 'app_proto' field: {log_entry}")
+
+          def process_alert_log(alert_json) -> None:
+              source_ip = alert_json["event"]["src_ip"]
+              protocol = alert_json["event"]["app_proto"]
+              unix_timestamp = str(alert_json["event_timestamp"])
+              firewall_name = alert_json["firewall_name"]
+
+              if protocol == "tls":
+                  hostname = alert_json["event"]["tls"].get("sni", None)
+              elif protocol == "http":
+                  hostname = alert_json["event"]["http"].get("hostname", None)
+              else:
+                  hostname = None
+
+              if not hostname:
+                  print("Hostname not found")
+                  return
+
+              print(f"Processing log entry for {hostname} ({protocol}) from {firewall_name}")
+
+              update_expression = "ADD #SourceIPs :source_ips SET #FirewallName = :firewall_name"
+              expression_attribute_values = {
+                  ":source_ips": {"SS": [source_ip]},
+                  ":firewall_name": {"S": firewall_name}
+              }
+
+              key = {
+                  "Hostname": {"S": hostname},
+                  "Protocol": {"S": protocol}
+              }
+
+              response = ddb.update_item(
+                  TableName=DDB_TABLE_NAME,
+                  Key=key,
+                  UpdateExpression=update_expression,
+                  ExpressionAttributeNames={
+                      "#SourceIPs": "Source IPs",
+                      "#FirewallName": "FirewallName"
+                  },
+                  ExpressionAttributeValues=expression_attribute_values,
+                  ReturnValues="ALL_NEW"
+              )
+              print(f"DynamoDB update response: {response}")
+
+              if "Attributes" in response:
+                  source_ips = set(response["Attributes"].get("Source IPs", {}).get("SS", []))
+                  last_updated_timestamp = response["Attributes"].get("Last Updated Timestamp", {}).get("N", unix_timestamp)
+
+                  if "Requests to Domain" not in response["Attributes"]:
+                      print(f"Creating new 'Requests to Domain' entry for {hostname}, {protocol}")
+                      ddb.update_item(
+                          TableName=DDB_TABLE_NAME,
+                          Key=key,
+                          UpdateExpression="SET #RequestsToDomain = :requests, #LastUpdatedTimestamp = :timestamp",
+                          ExpressionAttributeNames={
+                              "#RequestsToDomain": "Requests to Domain",
+                              "#LastUpdatedTimestamp": "Last Updated Timestamp"
+                          },
+                          ExpressionAttributeValues={
+                              ":requests": {"N": "1"},
+                              ":timestamp": {"N": unix_timestamp}
+                          }
+                      )
+                  else:
+                      existing_requests = int(response["Attributes"]["Requests to Domain"]["N"])
+                      if source_ip not in source_ips or str(unix_timestamp) != last_updated_timestamp:
+                          new_requests = existing_requests + 1
+                          print(f"Updating 'Requests to Domain' for {hostname}, {protocol} to {new_requests}")
+                          ddb.update_item(
+                              TableName=DDB_TABLE_NAME,
+                              Key=key,
+                              UpdateExpression="SET #RequestsToDomain = :requests, #LastUpdatedTimestamp = :timestamp ADD #SourceIPs :source_ip",
+                              ExpressionAttributeNames={
+                                  "#RequestsToDomain": "Requests to Domain",
+                                  "#LastUpdatedTimestamp": "Last Updated Timestamp",
+                                  "#SourceIPs": "Source IPs"
+                              },
+                              ExpressionAttributeValues={
+                                  ":requests": {"N": str(new_requests)},
+                                  ":timestamp": {"N": unix_timestamp},
+                                  ":source_ip": {"SS": [source_ip]}
+                              }
+                          )
+                      else:
+                          print(f"Skipping 'Requests to Domain' update for {hostname}, {protocol} (duplicate log)")
+
+                  print(f"Updating 'Unique Source IP Count' for {hostname}, {protocol}")
+                  ddb.update_item(
+                      TableName=DDB_TABLE_NAME,
+                      Key=key,
+                      UpdateExpression="SET #UniqueSourceIPCount = :workloads",
+                      ExpressionAttributeNames={
+                          "#UniqueSourceIPCount": "Unique Source IP Count"
+                      },
+                      ExpressionAttributeValues={":workloads": {"N": str(len(source_ips))}}
+                  )
+
+          def lambda_handler(event, context):
+              print("Lambda function invoked.")
+              
+              if "Records" in event and event["Records"][0]["eventSource"] == "aws:s3":
+                  print("Processing S3 event...")
+                  bucket_name = event['Records'][0]['s3']['bucket']['name']
+                  key = event['Records'][0]['s3']['object']['key']
+
+                  print(f"Downloading log file from S3 bucket: {bucket_name}, key: {key}")
+                  response = s3.get_object(Bucket=bucket_name, Key=key)
+                  log_data = response['Body'].read()
+
+                  print("Decompressing log file...")
+                  log_data = gzip.decompress(log_data)
+
+                  process_logs(log_data.decode('utf-8'))
+              else:
+                  print("Processing EventBridge event...")
+                  generate_and_store_rules(event)
+
+          def generate_and_store_rules(event) -> None:
+              print("Generating rules...")
+              hostname_stats = get_hostname_stats()
+
+              if not hostname_stats:
+                  print("No hostname logs have been processed")
+                  return
+
+              # Group hostnames by firewall
+              firewall_groups = defaultdict(list)
+              for (hostname, protocol, firewall_name) in hostname_stats.keys():
+                  firewall_groups[firewall_name].append((hostname, protocol, firewall_name))
+
+              rules = []
+              i = 0
+
+              # Process rules for each firewall separately
+              for firewall_name, firewall_hostnames in firewall_groups.items():
+                  rules.extend(["", "", f"# Rules for Firewall: {firewall_name}", ""])
+                  
+                  # Sort hostnames within this firewall group
+                  sorted_hostnames = sorted(firewall_hostnames, 
+                                          key=lambda x: hostname_stats[x]['Requests to Domain'],
+                                          reverse=True)
+                  top_hostnames = sorted_hostnames[:MAX_RULES]
+
+                  sid_width = math.ceil(math.log10(MAX_RULES))
+
+                  # TLS wildcard rules
+                  rules.append(f"# TLS Wildcard Rules - {firewall_name}")
+
+                  tls_domain_counts = defaultdict(int)
+                  tls_domain_stats = defaultdict(lambda: {"Source IPs": set(), "Requests to Domain": 0})
+                  for hostname, protocol, fw_name in top_hostnames:
+                      if protocol == "tls":
+                          domain = ".".join(hostname.split(".")[-2:])
+                          tls_domain_counts[domain] += 1
+                          tls_domain_stats[domain]["Source IPs"].update(hostname_stats[(hostname, protocol, fw_name)]["Source IPs"])
+                          tls_domain_stats[domain]["Requests to Domain"] += hostname_stats[(hostname, protocol, fw_name)]["Requests to Domain"]
+
+                  for domain, count in sorted(tls_domain_counts.items(), key=lambda x: x[1], reverse=True):
+                      if count >= WILDCARD_DOMAIN_MINIMUM:
+                          clients = len(tls_domain_stats[domain]["Source IPs"])
+                          requests = tls_domain_stats[domain]["Requests to Domain"]
+
+                          # TLS Alert rule
+                          sid = str(i).zfill(sid_width)
+                          wildcard_rule = ALERT_TEMPLATE_TLS.format(
+                              message=ALERT_MESSAGE,
+                              clients=clients,
+                              requests=requests,
+                              hostname=f".{domain}",
+                              sid=f"{RULE_SID_PREFIX}{sid}"
+                          )
+                          rules.append(wildcard_rule)
+                          i += 1
+
+                          # TLS Pass rule
+                          sid = str(i).zfill(sid_width)
+                          wildcard_rule = PASS_TEMPLATE_TLS.format(
+                              hostname=f".{domain}",
+                              clients=clients,
+                              requests=requests,
+                              sid=f"{RULE_SID_PREFIX}{sid}"
+                          )
+                          rules.append(wildcard_rule)
+                          i += 1
+
+                  # HTTP wildcard rules
+                  rules.extend(["", ""])
+                  rules.append(f"# HTTP Wildcard Rules - {firewall_name}")
+
+                  http_domain_counts = defaultdict(int)
+                  http_domain_stats = defaultdict(lambda: {"Source IPs": set(), "Requests to Domain": 0})
+                  for hostname, protocol, fw_name in top_hostnames:
+                      if protocol == "http":
+                          domain = ".".join(hostname.split(".")[-2:])
+                          http_domain_counts[domain] += 1
+                          http_domain_stats[domain]["Source IPs"].update(hostname_stats[(hostname, protocol, fw_name)]["Source IPs"])
+                          http_domain_stats[domain]["Requests to Domain"] += hostname_stats[(hostname, protocol, fw_name)]["Requests to Domain"]
+
+                  for domain, count in sorted(http_domain_counts.items(), key=lambda x: x[1], reverse=True):
+                      if count >= WILDCARD_DOMAIN_MINIMUM:
+                          clients = len(http_domain_stats[domain]["Source IPs"])
+                          requests = http_domain_stats[domain]["Requests to Domain"]
+
+                          # HTTP Alert rule
+                          sid = str(i).zfill(sid_width)
+                          wildcard_rule = ALERT_TEMPLATE_HTTP.format(
+                              message=ALERT_MESSAGE,
+                              clients=clients,
+                              requests=requests,
+                              hostname=f".{domain}",
+                              sid=f"{RULE_SID_PREFIX}{sid}"
+                          )
+                          rules.append(wildcard_rule)
+                          i += 1
+
+                          # HTTP Pass rule
+                          sid = str(i).zfill(sid_width)
+                          wildcard_rule = PASS_TEMPLATE_HTTP.format(
+                              hostname=f".{domain}",
+                              clients=clients,
+                              requests=requests,
+                              sid=f"{RULE_SID_PREFIX}{sid}"
+                          )
+                          rules.append(wildcard_rule)
+                          i += 1
+
+                  # TLS specific rules
+                  rules.extend(["", ""])
+                  rules.append(f"# TLS Specific Rules - {firewall_name}")
+
+                  for hostname, protocol, fw_name in sorted(top_hostnames, 
+                                                          key=lambda x: hostname_stats[x]['Requests to Domain'], 
+                                                          reverse=True):
+                      if protocol == "tls":
+                          stats = hostname_stats[(hostname, protocol, fw_name)]
+
+                          # TLS Alert rule
+                          sid = str(i).zfill(sid_width)
+                          params = {
+                              "hostname": hostname,
+                              "clients": stats["Unique Source IP Count"],
+                              "requests": stats["Requests to Domain"],
+                              "sid": f"{RULE_SID_PREFIX}{sid}",
+                              "message": ALERT_MESSAGE
+                          }
+                          rules.append(ALERT_TEMPLATE_TLS.format(**params))
+                          i += 1
+
+                          # TLS Pass rule
+                          sid = str(i).zfill(sid_width)
+                          params = {
+                              "hostname": hostname,
+                              "clients": stats["Unique Source IP Count"],
+                              "requests": stats["Requests to Domain"],
+                              "sid": f"{RULE_SID_PREFIX}{sid}"
+                          }
+                          rules.append(PASS_TEMPLATE_TLS.format(**params))
+                          i += 1
+
+                  # HTTP specific rules
+                  rules.extend(["", ""])
+                  rules.append(f"# HTTP Specific Rules - {firewall_name}")
+
+                  for hostname, protocol, fw_name in sorted(top_hostnames, 
+                                                          key=lambda x: hostname_stats[x]['Requests to Domain'], 
+                                                          reverse=True):
+                      if protocol == "http":
+                          stats = hostname_stats[(hostname, protocol, fw_name)]
+
+                          # HTTP Alert rule
+                          sid = str(i).zfill(sid_width)
+                          params = {
+                              "hostname": hostname,
+                              "clients": stats["Unique Source IP Count"],
+                              "requests": stats["Requests to Domain"],
+                              "sid": f"{RULE_SID_PREFIX}{sid}",
+                              "message": ALERT_MESSAGE
+                          }
+                          rules.append(ALERT_TEMPLATE_HTTP.format(**params))
+                          i += 1
+
+                          # HTTP Pass rule
+                          sid = str(i).zfill(sid_width)
+                          params = {
+                              "hostname": hostname,
+                              "clients": stats["Unique Source IP Count"],
+                              "requests": stats["Requests to Domain"],
+                              "sid": f"{RULE_SID_PREFIX}{sid}"
+                          }
+                          rules.append(PASS_TEMPLATE_HTTP.format(**params))
+                          i += 1
+
+              # Write rules to S3
+              rule_string = "\n".join(rules)
+              try:
+                  s3.put_object(
+                      Bucket=RULES_BUCKET_NAME,
+                      Key='rules.txt',
+                      Body=rule_string.encode('utf-8')
+                  )
+                  print("Rules written to S3 successfully.")
+              except Exception as e:
+                  print(f"Error writing rules to S3: {e}")
+
+      Handler: index.lambda_handler
+      LoggingConfig:
+        LogGroup: !Ref RuleGroupUpdaterFunctionLogGroup
+      MemorySize: 256
+      Environment:
+        Variables:
+          WILDCARD_DOMAIN_MINIMUM: !Ref WildcardDomainMinimum
+          DDB_TABLE_NAME: !Ref FlowStatsTable
+          RULE_SID_PREFIX: !Ref RuleSidPrefix
+          ALERT_MESSAGE: !Ref AlertMessage
+          RULES_BUCKET_NAME: !Ref RulesBucket
+      ReservedConcurrentExecutions: 2
+      Role: !GetAtt RuleGroupUpdaterFunctionRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+
+  RuleGroupUpdaterFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 1
+      LogGroupName: !Sub "/aws/lambda/${AWS::StackName}-RuleGroupUpdaterFunction"
+      
+  RuleGroupUpdaterFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+
+  RuleGroupUpdaterFunctionPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: NFWAllowListLambdaPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: "arn:aws:logs:*:*:*"
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${LogBucket}/*'
+          - Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+            Resource: !Sub 'arn:aws:s3:::${RulesBucket}/*'
+          - Effect: Allow
+            Action:
+              - dynamodb:Scan
+              - dynamodb:UpdateItem
+            Resource: !GetAtt FlowStatsTable.Arn
+      Roles:
+        - !Ref RuleGroupUpdaterFunctionRole
