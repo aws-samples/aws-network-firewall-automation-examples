@@ -1,11 +1,12 @@
 import json
-import urllib
+import urllib.request
 import boto3
 from datetime import datetime
 
-# Constants
-SPAM_HAUS_DROP_URL = "https://www.spamhaus.org/drop/drop.txt"
+# Configuration - adjust these values based on your setup
+THREAT_INTEL_URL = "https://www.spamhaus.org/drop/drop.txt"  # SpamHaus DROP list
 RULE_GROUP_ARN = '<REPLACE-ME-WITH-THE-ARN-OF-YOUR-RULE-GROUP>'
+
 # SID ranges for Suricata rules - adjust these to avoid conflicts with other rule sources
 # Each IP gets two rules: one for traffic FROM the IP, one for traffic TO the IP
 SID_PREFIX_FROM = 10000  # SIDs for traffic FROM blocked IPs (10000-19999 range)
@@ -23,7 +24,7 @@ networkfirewall = boto3.client('network-firewall')
 def fetch_ips():
     print("Fetching the list of IP addresses...")
     try:
-        with urllib.request.urlopen(SPAM_HAUS_DROP_URL) as response:
+        with urllib.request.urlopen(THREAT_INTEL_URL) as response:
             data = response.read().decode('utf-8')
         
         list_of_ips = [line.split(" ;")[0] for line in data.splitlines() if line.strip() and line[0].isdigit()]
