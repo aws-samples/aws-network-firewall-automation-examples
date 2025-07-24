@@ -48,27 +48,34 @@ def fetch_ips():
     return []
 
 
-def update_rules(rule_group):
-    params = rule_group.copy()
-    params.pop('Capacity', None)
-    params['RuleGroupName'] = params['RuleGroupResponse']['RuleGroupName']
-    params['Type'] = params['RuleGroupResponse']['Type']
-    # Remove keys that can't be updated
-    params.pop('ResponseMetadata', None)
-    params.pop('Capacity', None)
-    params.pop('RuleGroupResponse', None)
-
+def update_rules(rule_group, rules_string):
+    rule_group_name = rule_group["RuleGroupResponse"]["RuleGroupName"]
+    
     print("Updating rules...")
     try:
-        res = networkfirewall.update_rule_group(**params)
+        # Use UpdateToken from the describe_rule_group response for safe updates
+        update_params = {
+            "UpdateToken": rule_group["UpdateToken"],
+            "RuleGroupArn": RULE_GROUP_ARN,
+            "RuleGroup": {
+                "RulesSource": {"RulesString": rules_string}
+            },
+            "Type": "STATEFUL"
+        }
+        
+        res = networkfirewall.update_rule_group(**update_params)
         if res:
-            print(f"Updated '{params['RuleGroupName']}'.")
+            print(f"Updated '{rule_group_name}'.")
             return True
         else:
-            print(f"Error updating the rules for '{params['RuleGroupName']}'...")
+            print(f"Error updating the rules for '{rule_group_name}'...")
             return False
+    except networkfirewall.exceptions.InvalidTokenException as e:
+        print(f"UpdateToken conflict for '{rule_group_name}': {str(e)}")
+        print("Rule group may have been updated by another process")
+        return False
     except Exception as e:
-        print(f"Error updating rules: {str(e)}")
+        print(f"Error updating rules for '{rule_group_name}': {str(e)}")
         return False
 
 
@@ -128,8 +135,8 @@ def create_rules(rule_group, rule_type):
         rules.append(rule_from)
         rules.append(rule_to)
 
-    rule_group['RuleGroup']['RulesSource']['RulesString'] = '\n'.join(rules)
-    return update_rules(rule_group)
+    rules_string = '\n'.join(rules)
+    return update_rules(rule_group, rules_string)
 
 
 def lambda_handler(event, context):
