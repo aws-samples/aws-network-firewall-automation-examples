@@ -18,7 +18,7 @@ RULE_MESSAGE_PREFIX = "SpamHaus blocked"  # Customize this for your organization
 
 # Rule capacity management - adjust RULE_GROUP_CAPACITY based on your Network
 # Firewall rule group capacity. Valid range: 100-30000 (AWS Network Firewall limits)
-RULE_GROUP_CAPACITY = 3000  # Total rule capacity of your rule group
+RULE_GROUP_CAPACITY = 5000  # Total rule capacity of your rule group
 # Each IP creates 2 rules (see rule generation below): one for inbound traffic,
 # one for outbound traffic
 MAX_RESULTS = RULE_GROUP_CAPACITY // 2  # 3000 ÷ 2 = 1500 IPs maximum

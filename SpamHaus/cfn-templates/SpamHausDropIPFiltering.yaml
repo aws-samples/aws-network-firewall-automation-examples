@@ -11,7 +11,7 @@ Parameters:
       - drop
   RuleGroupCapacity:
     Type: Number
-    Default: 3000
+    Default: 5000
     Description: Maximum number of rules this rule group can contain
     MinValue: 100
     MaxValue: 30000
