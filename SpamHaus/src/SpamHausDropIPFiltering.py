@@ -12,6 +12,9 @@ RULE_GROUP_ARN = '<REPLACE-ME-WITH-THE-ARN-OF-YOUR-RULE-GROUP>'
 SID_PREFIX_FROM = 10000  # SIDs for traffic FROM blocked IPs (10000-19999 range)
 SID_PREFIX_TO = 15000    # SIDs for traffic TO blocked IPs (15000-19999 range)
 
+# Rule message configuration
+RULE_MESSAGE_PREFIX = "SpamHaus blocked"  # Customize this for your organization
+
 # Rule capacity management - adjust RULE_GROUP_CAPACITY based on your Network Firewall rule group capacity
 # Valid range: 100-30000 (AWS Network Firewall limits)
 RULE_GROUP_CAPACITY = 3000  # Total rule capacity of your rule group
@@ -61,6 +64,19 @@ def update_rules(rule_group):
         print(f"Error updating rules: {str(e)}")
         return False
 
+def generate_ip_rule(rule_type, ip, direction, message, sid):
+    if direction == "from":
+        template = '{rule_type} ip {ip} any -> any any (msg:"{message} traffic from {ip}"; rev:1; sid:{sid};)'
+    else:
+        template = '{rule_type} ip any any -> {ip} any (msg:"{message} traffic to {ip}"; rev:1; sid:{sid};)'
+    
+    return template.format(
+        rule_type=rule_type,
+        ip=ip,
+        message=message,
+        sid=f"{sid:04d}"  # Format SID as 4-digit number with leading zeros (e.g., 0001, 0123, 1000)
+    )
+
 def create_rules(rule_group, rule_type):
     list_of_ips = fetch_ips()
     
@@ -80,8 +96,22 @@ def create_rules(rule_group, rule_type):
         rules.append(f"# WARNING: IP list truncated from {original_count} to {MAX_RESULTS} due to rule capacity limits")
 
     for index, ip in enumerate(list_of_ips):
-        rules.append(f"{rule_type} ip {ip} any -> any any (msg:\"{rule_type} emerging threats traffic from {ip}\"; rev:1; sid:{SID_PREFIX_FROM + index};)")
-        rules.append(f"{rule_type} ip any any -> {ip} any (msg:\"{rule_type} emerging threats traffic to {ip}\"; rev:1; sid:{SID_PREFIX_TO + index};)")
+        rule_from = generate_ip_rule(
+            rule_type, 
+            ip, 
+            "from", 
+            RULE_MESSAGE_PREFIX, 
+            SID_PREFIX_FROM + index
+        )
+        rule_to = generate_ip_rule(
+            rule_type, 
+            ip, 
+            "to", 
+            RULE_MESSAGE_PREFIX, 
+            SID_PREFIX_TO + index
+        )
+        rules.append(rule_from)
+        rules.append(rule_to)
 
     rule_group['RuleGroup']['RulesSource']['RulesString'] = '\n'.join(rules)
     return update_rules(rule_group)

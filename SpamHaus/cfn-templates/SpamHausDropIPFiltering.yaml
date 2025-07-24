@@ -1,14 +1,14 @@
 Parameters:
   RuleGroupName:
     Type: String
-    Default: 'SpamHausIPList'
+    Default: "SpamHausIPList"
   RuleGroupAction:
     Type: String
     Description: "Used to define the action to take on a matching rule if found"
-    Default : 'drop'
+    Default: "drop"
     AllowedValues:
-      - 'alert'
-      - 'drop'
+      - "alert"
+      - "drop"
   RuleGroupCapacity:
     Type: Number
     Default: 3000
@@ -18,81 +18,81 @@ Parameters:
 
 Resources:
   StatefulRulegroup:
-    Type: 'AWS::NetworkFirewall::RuleGroup'
+    Type: "AWS::NetworkFirewall::RuleGroup"
     Properties:
       RuleGroupName: !Sub "${AWS::StackName}-${RuleGroupName}-${RuleGroupAction}"
       Type: STATEFUL
       RuleGroup:
         RulesSource:
-          RulesString: '#This will be updated via the Lambda function'
+          RulesString: "#This will be updated via the Lambda function"
       Capacity: !Ref RuleGroupCapacity
       Description: >-
         Used to track a list of Emerging IP Threats from
         https://www.spamhaus.org/drop/drop.txt
-      Tags: 
+      Tags:
         - Key: "ProjectName"
           Value: "SpamHausIPFiltering"
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
-        Version: '2012-10-17'
+        Version: "2012-10-17"
         Statement:
-        - Effect: Allow
-          Principal:
-            Service:
-            - lambda.amazonaws.com
-          Action:
-          - sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
       Path: "/"
       Policies:
-      - PolicyName: LambdaLogs
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Action:
-              - 'logs:CreateLogStream'
-              - 'logs:PutLogEvents'
-            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*'
-      - PolicyName: NetworkFirewall
-        PolicyDocument:
-          Version: '2012-10-17'
-          Statement:
-          - Effect: Allow
-            Action:
-            - 'network-firewall:*'
-            Resource: 
-              - !GetAtt StatefulRulegroup.RuleGroupArn
-      Tags: 
-          - Key: "ProjectName"
-            Value: "SpamHausIPFiltering"
+        - PolicyName: LambdaLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - PolicyName: NetworkFirewall
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "network-firewall:*"
+                Resource:
+                  - !GetAtt StatefulRulegroup.RuleGroupArn
+      Tags:
+        - Key: "ProjectName"
+          Value: "SpamHausIPFiltering"
   LambdaLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub "/aws/lambda/${LambdaFunction}"
       RetentionInDays: 14
     DeletionPolicy: Retain
-  ScheduledRule: 
+  ScheduledRule:
     Type: AWS::Events::Rule
-    Properties: 
+    Properties:
       Description: "SpamHausDropDailyTrigger"
       ScheduleExpression: "cron(0 0 * * ? *)"
       State: "ENABLED"
-      Targets: 
-        - Arn: 
-            Fn::GetAtt: 
+      Targets:
+        - Arn:
+            Fn::GetAtt:
               - "LambdaFunction"
               - "Arn"
           Id: "TargetFunctionV1"
-  PermissionForEventsToInvokeLambda: 
+  PermissionForEventsToInvokeLambda:
     Type: AWS::Lambda::Permission
-    Properties: 
+    Properties:
       FunctionName: !Ref "LambdaFunction"
       Action: "lambda:InvokeFunction"
       Principal: "events.amazonaws.com"
-      SourceArn: 
-        Fn::GetAtt: 
+      SourceArn:
+        Fn::GetAtt:
           - "ScheduledRule"
           - "Arn"
   LambdaInvoke:
@@ -108,7 +108,7 @@ Resources:
       Handler: index.lambda_handler
       Timeout: 60
       Description: Used to fetch data from the Emerging Threats IP list and update the associated RuleGroup
-      Tags: 
+      Tags:
         - Key: "ProjectName"
           Value: "SpamHausIPFiltering"
       Code:
@@ -127,6 +127,9 @@ Resources:
           # Each IP gets two rules: one for traffic FROM the IP, one for traffic TO the IP
           SID_PREFIX_FROM = 10000  # SIDs for traffic FROM blocked IPs (10000-19999 range)
           SID_PREFIX_TO = 15000    # SIDs for traffic TO blocked IPs (15000-19999 range)
+
+          # Rule message configuration
+          RULE_MESSAGE_PREFIX = "SpamHaus blocked"  # Customize this for your organization
 
           # Rule capacity management
           RULE_GROUP_CAPACITY = ${RuleGroupCapacity}
@@ -176,6 +179,19 @@ Resources:
                   print(f"Error updating rules: {str(e)}")
                   return False
 
+          def generate_ip_rule(rule_type, ip, direction, message, sid):
+              if direction == "from":
+                  template = '{rule_type} ip {ip} any -> any any (msg:"{message} traffic from {ip}"; rev:1; sid:{sid};)'
+              else:
+                  template = '{rule_type} ip any any -> {ip} any (msg:"{message} traffic to {ip}"; rev:1; sid:{sid};)'
+              
+              return template.format(
+                  rule_type=rule_type,
+                  ip=ip,
+                  message=message,
+                  sid=f"{sid:04d}"  # Format SID as 4-digit number with leading zeros (e.g., 0001, 0123, 1000)
+              )
+
           def create_rules(rule_group, rule_type):
               list_of_ips = fetch_ips()
               
@@ -195,8 +211,22 @@ Resources:
                   rules.append(f"# WARNING: IP list truncated from {original_count} to {MAX_RESULTS} due to rule capacity limits")
 
               for index, ip in enumerate(list_of_ips):
-                  rules.append(f"{rule_type} ip {ip} any -> any any (msg:\"{rule_type} emerging threats traffic from {ip}\"; rev:1; sid:{SID_PREFIX_FROM + index};)")
-                  rules.append(f"{rule_type} ip any any -> {ip} any (msg:\"{rule_type} emerging threats traffic to {ip}\"; rev:1; sid:{SID_PREFIX_TO + index};)")
+                  rule_from = generate_ip_rule(
+                      rule_type, 
+                      ip, 
+                      "from", 
+                      RULE_MESSAGE_PREFIX, 
+                      SID_PREFIX_FROM + index
+                  )
+                  rule_to = generate_ip_rule(
+                      rule_type, 
+                      ip, 
+                      "to", 
+                      RULE_MESSAGE_PREFIX, 
+                      SID_PREFIX_TO + index
+                  )
+                  rules.append(rule_from)
+                  rules.append(rule_to)
 
               rule_group['RuleGroup']['RulesSource']['RulesString'] = '\n'.join(rules)
               return update_rules(rule_group)
