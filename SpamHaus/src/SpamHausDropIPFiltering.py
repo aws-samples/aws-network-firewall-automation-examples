@@ -11,6 +11,12 @@ RULE_GROUP_ARN = '<REPLACE-ME-WITH-THE-ARN-OF-YOUR-RULE-GROUP>'
 SID_PREFIX_FROM = 10000  # SIDs for traffic FROM blocked IPs (10000-19999 range)
 SID_PREFIX_TO = 15000    # SIDs for traffic TO blocked IPs (15000-19999 range)
 
+# Rule capacity management - adjust RULE_GROUP_CAPACITY based on your Network Firewall rule group capacity
+# Valid range: 100-30000 (AWS Network Firewall limits)
+RULE_GROUP_CAPACITY = 3000  # Total rule capacity of your rule group
+# Each IP creates 2 rules (see rule generation below): one for inbound traffic, one for outbound traffic
+MAX_RESULTS = RULE_GROUP_CAPACITY // 2  # 3000 ÷ 2 = 1500 IPs maximum
+
 # Initialize AWS clients
 networkfirewall = boto3.client('network-firewall')
 
@@ -61,9 +67,16 @@ def create_rules(rule_group, rule_type):
         print("No IP addresses fetched. Aborting rule creation.")
         return False
 
+    # Limit results to stay within rule capacity
+    original_count = len(list_of_ips)
+    list_of_ips = list_of_ips[:MAX_RESULTS]
+    was_truncated = original_count > MAX_RESULTS
+
     rules = []
     rules.append(f"# Last updated: {datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}")
-    rules.append(f"# Using a list of {len(list_of_ips)} IP addresses")
+    rules.append(f"# Processing {len(list_of_ips)} of {original_count} IP addresses (limit: {MAX_RESULTS})")
+    if was_truncated:
+        rules.append(f"# WARNING: IP list truncated from {original_count} to {MAX_RESULTS} due to rule capacity limits")
 
     for index, ip in enumerate(list_of_ips):
         rules.append(f"{rule_type} ip {ip} any -> any any (msg:\"{rule_type} emerging threats traffic from {ip}\"; rev:1; sid:{SID_PREFIX_FROM + index};)")
