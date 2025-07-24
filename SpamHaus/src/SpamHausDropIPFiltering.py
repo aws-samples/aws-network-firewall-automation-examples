@@ -30,12 +30,12 @@ networkfirewall = boto3.client('network-firewall')
 def fetch_ips():
     print("Fetching the list of IP addresses...")
     try:
-        with urllib.request.urlopen(THREAT_INTEL_URL) as response:
+        with urllib.request.urlopen(THREAT_INTEL_URL, timeout=30) as response:
             data = response.read().decode('utf-8')
         
         list_of_ips = [
             line.split(" ;")[0] for line in data.splitlines() 
-            if line.strip() and line[0].isdigit()
+            if line.strip() and line.strip()[0].isdigit()
         ]
         print(f"Fetched {len(list_of_ips)} IP addresses...")
         return list_of_ips
