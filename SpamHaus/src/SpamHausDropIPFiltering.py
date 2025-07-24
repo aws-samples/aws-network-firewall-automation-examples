@@ -70,13 +70,14 @@ def update_rules(rule_group, rules_string):
         else:
             print(f"Error updating the rules for '{rule_group_name}'...")
             return False
-    except networkfirewall.exceptions.InvalidTokenException as e:
-        print(f"UpdateToken conflict for '{rule_group_name}': {str(e)}")
-        print("Rule group may have been updated by another process")
-        return False
     except Exception as e:
-        print(f"Error updating rules for '{rule_group_name}': {str(e)}")
-        return False
+        if 'InvalidToken' in str(e):
+            print(f"UpdateToken conflict for '{rule_group_name}': {str(e)}")
+            print("Rule group may have been updated by another process")
+            return False
+        else:
+            print(f"Error updating rules for '{rule_group_name}': {str(e)}")
+            return False
 
 
 def generate_ip_rule(rule_type, ip, direction, message, sid):
