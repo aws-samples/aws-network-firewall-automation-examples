@@ -104,7 +104,7 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Role: !GetAtt LambdaExecutionRole.Arn
-      Runtime: python3.12
+      Runtime: python3.13
       Handler: index.lambda_handler
       Timeout: 60
       Description: Used to fetch data from the Emerging Threats IP list and update the associated RuleGroup
