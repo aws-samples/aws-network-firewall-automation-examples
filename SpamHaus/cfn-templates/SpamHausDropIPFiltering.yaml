@@ -123,8 +123,9 @@ Resources:
           THREAT_INTEL_URL = "https://www.spamhaus.org/drop/drop.txt"  # SpamHaus DROP list
           RULE_GROUP_ARN = '${StatefulRulegroup.RuleGroupArn}'
 
-          # SID ranges for Suricata rules - adjust these to avoid conflicts with other rule sources
-          # Each IP gets two rules: one for traffic FROM the IP, one for traffic TO the IP
+          # SID ranges for Suricata rules - adjust these to avoid conflicts with other
+          # rule sources. Each IP gets two rules: one for traffic FROM the IP, one for
+          # traffic TO the IP
           SID_PREFIX_FROM = 10000  # SIDs for traffic FROM blocked IPs (10000-19999 range)
           SID_PREFIX_TO = 15000    # SIDs for traffic TO blocked IPs (15000-19999 range)
 
@@ -133,7 +134,8 @@ Resources:
 
           # Rule capacity management
           RULE_GROUP_CAPACITY = ${RuleGroupCapacity}
-          # Each IP creates 2 rules (see rule generation below): one for inbound traffic, one for outbound traffic  
+          # Each IP creates 2 rules (see rule generation below): one for inbound traffic,
+          # one for outbound traffic  
           MAX_RESULTS = RULE_GROUP_CAPACITY // 2  # e.g., 3000 ÷ 2 = 1500 IPs maximum
 
           # Initialize AWS clients
@@ -145,7 +147,10 @@ Resources:
                   with urllib.request.urlopen(THREAT_INTEL_URL) as response:
                       data = response.read().decode('utf-8')
                   
-                  list_of_ips = [line.split(" ;")[0] for line in data.splitlines() if line.strip() and line[0].isdigit()]
+                  list_of_ips = [
+                      line.split(" ;")[0] for line in data.splitlines() 
+                      if line.strip() and line[0].isdigit()
+                  ]
                   print(f"Fetched {len(list_of_ips)} IP addresses...")
                   return list_of_ips
               except urllib.error.URLError as e:
@@ -158,22 +163,22 @@ Resources:
 
           def update_rules(rule_group):
               params = rule_group.copy()
-              params.pop('Capacity', None)
-              params['RuleGroupName'] = params['RuleGroupResponse']['RuleGroupName']
-              params['Type'] = params['RuleGroupResponse']['Type']
+              params.pop("Capacity", None)
+              params["RuleGroupName"] = params["RuleGroupResponse"]["RuleGroupName"]
+              params["Type"] = params["RuleGroupResponse"]["Type"]
               # Remove keys that can't be updated
-              params.pop('ResponseMetadata', None)
-              params.pop('Capacity', None)
-              params.pop('RuleGroupResponse', None)
+              params.pop("ResponseMetadata", None)
+              params.pop("Capacity", None)
+              params.pop("RuleGroupResponse", None)
 
               print("Updating rules...")
               try:
                   res = networkfirewall.update_rule_group(**params)
                   if res:
-                      print(f"Updated '{params['RuleGroupName']}'.")
+                      print(f"Updated '{params[\"RuleGroupName\"]}'.")
                       return True
                   else:
-                      print(f"Error updating the rules for '{params['RuleGroupName']}'...")
+                      print(f"Error updating the rules for '{params[\"RuleGroupName\"]}'...")
                       return False
               except Exception as e:
                   print(f"Error updating rules: {str(e)}")
@@ -181,15 +186,18 @@ Resources:
 
           def generate_ip_rule(rule_type, ip, direction, message, sid):
               if direction == "from":
-                  template = '{rule_type} ip {ip} any -> any any (msg:"{message} traffic from {ip}"; rev:1; sid:{sid};)'
+                  template = ('{rule_type} ip {ip} any -> any any '
+                             '(msg:"{message} traffic from {ip}"; rev:1; sid:{sid};)')
               else:
-                  template = '{rule_type} ip any any -> {ip} any (msg:"{message} traffic to {ip}"; rev:1; sid:{sid};)'
+                  template = ('{rule_type} ip any any -> {ip} any '
+                             '(msg:"{message} traffic to {ip}"; rev:1; sid:{sid};)')
               
               return template.format(
                   rule_type=rule_type,
                   ip=ip,
                   message=message,
-                  sid=f"{sid:04d}"  # Format SID as 4-digit number with leading zeros (e.g., 0001, 0123, 1000)
+                  # Format SID as 4-digit number with leading zeros (e.g., 0001, 0123, 1000)
+                  sid=f"{sid:04d}"
               )
 
           def create_rules(rule_group, rule_type):
@@ -205,58 +213,94 @@ Resources:
               was_truncated = original_count > MAX_RESULTS
 
               rules = []
-              rules.append(f"# Last updated: {datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')}")
-              rules.append(f"# Processing {len(list_of_ips)} of {original_count} IP addresses (limit: {MAX_RESULTS})")
+              timestamp = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
+              rules.append(f"# Last updated: {timestamp}")
+              rules.append(f"# Processing {len(list_of_ips)} of {original_count} "
+                          f"IP addresses (limit: {MAX_RESULTS})")
               if was_truncated:
-                  rules.append(f"# WARNING: IP list truncated from {original_count} to {MAX_RESULTS} due to rule capacity limits")
+                  rules.append(f"# WARNING: IP list truncated from {original_count} to "
+                              f"{MAX_RESULTS} due to rule capacity limits")
 
               for index, ip in enumerate(list_of_ips):
                   rule_from = generate_ip_rule(
-                      rule_type, 
-                      ip, 
-                      "from", 
-                      RULE_MESSAGE_PREFIX, 
+                      rule_type,
+                      ip,
+                      "from",
+                      RULE_MESSAGE_PREFIX,
                       SID_PREFIX_FROM + index
                   )
                   rule_to = generate_ip_rule(
-                      rule_type, 
-                      ip, 
-                      "to", 
-                      RULE_MESSAGE_PREFIX, 
+                      rule_type,
+                      ip,
+                      "to",
+                      RULE_MESSAGE_PREFIX,
                       SID_PREFIX_TO + index
                   )
                   rules.append(rule_from)
                   rules.append(rule_to)
 
-              rule_group['RuleGroup']['RulesSource']['RulesString'] = '\n'.join(rules)
+              rule_group["RuleGroup"]["RulesSource"]["RulesString"] = "\n".join(rules)
               return update_rules(rule_group)
 
           def lambda_handler(event, context):
-              #handle delete event
-              if event['RequestType'] == 'Delete':
-                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, "Successfully processed Delete request")
+              # Handle delete event
+              if event["RequestType"] == "Delete":
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.SUCCESS,
+                      {},
+                      "Successfully processed Delete request"
+                  )
                   return
               try:
-                  params = {"Type": "STATEFUL", "RuleGroupArn": RULE_GROUP_ARN}
+                  params = {
+                      "Type": "STATEFUL", 
+                      "RuleGroupArn": RULE_GROUP_ARN
+                  }
                   
                   print("Searching Rule Groups for 'SpamHausIPList'...")
                   res = networkfirewall.describe_rule_group(**params)
 
-                  if 'RuleGroupResponse' in res:
+                  if "RuleGroupResponse" in res:
                       print("Found Rule Group...")
                       success = create_rules(res, "drop")
                       if success:
-                          cfnresponse.send(event, context, cfnresponse.SUCCESS, {"Message": "Successfully updated Network Firewall rules with SpamHaus IP list"}, "Rule Group update successful")
+                          cfnresponse.send(
+                              event,
+                              context,
+                              cfnresponse.SUCCESS,
+                              {"Message": "Successfully updated Network Firewall rules with SpamHaus IP list"},
+                              "Rule Group update successful"
+                          )
                       else:
-                          cfnresponse.send(event, context, cfnresponse.FAILED, {"Message": "Failed to update Network Firewall rules"}, "Rule Group update failed")
+                          cfnresponse.send(
+                              event,
+                              context,
+                              cfnresponse.FAILED,
+                              {"Message": "Failed to update Network Firewall rules"},
+                              "Rule Group update failed"
+                          )
                   else:
                       print("ERROR: No matching Rule Group found...")
-                      cfnresponse.send(event, context, cfnresponse.FAILED, {"Message": "No matching Rule Group found for the provided ARN"}, "Rule Group not found")
+                      cfnresponse.send(
+                          event,
+                          context,
+                          cfnresponse.FAILED,
+                          {"Message": "No matching Rule Group found for the provided ARN"},
+                          "Rule Group not found"
+                      )
               except Exception as e:
-                  print(f"Error in lambda_handler: {str(e)}")
-                  cfnresponse.send(event, context, cfnresponse.FAILED, {"Message": f"An error occurred: {str(e)}"}, "Lambda execution failed")
+                  print(f"An error occurred: {str(e)}")
+                  cfnresponse.send(
+                      event,
+                      context,
+                      cfnresponse.FAILED,
+                      {"Message": f"An error occurred: {str(e)}"},
+                      "Lambda execution failed"
+                  )
 
               return {
-                  'statusCode': 200,
-                  'body': json.dumps('Function executed successfully')
+                  "statusCode": 200,
+                  "body": json.dumps("Function executed successfully")
               }
