@@ -6,6 +6,10 @@ from datetime import datetime
 # Constants
 SPAM_HAUS_DROP_URL = "https://www.spamhaus.org/drop/drop.txt"
 RULE_GROUP_ARN = '<REPLACE-ME-WITH-THE-ARN-OF-YOUR-RULE-GROUP>'
+# SID ranges for Suricata rules - adjust these to avoid conflicts with other rule sources
+# Each IP gets two rules: one for traffic FROM the IP, one for traffic TO the IP
+SID_PREFIX_FROM = 10000  # SIDs for traffic FROM blocked IPs (10000-19999 range)
+SID_PREFIX_TO = 15000    # SIDs for traffic TO blocked IPs (15000-19999 range)
 
 # Initialize AWS clients
 networkfirewall = boto3.client('network-firewall')
@@ -62,8 +66,8 @@ def create_rules(rule_group, rule_type):
     rules.append(f"# Using a list of {len(list_of_ips)} IP addresses")
 
     for index, ip in enumerate(list_of_ips):
-        rules.append(f"{rule_type} ip {ip} any -> any any (msg:\"{rule_type} emerging threats traffic from {ip}\"; rev:1; sid:55{index};)")
-        rules.append(f"{rule_type} ip any any -> {ip} any (msg:\"{rule_type} emerging threats traffic to {ip}\"; rev:1; sid:66{index};)")
+        rules.append(f"{rule_type} ip {ip} any -> any any (msg:\"{rule_type} emerging threats traffic from {ip}\"; rev:1; sid:{SID_PREFIX_FROM + index};)")
+        rules.append(f"{rule_type} ip any any -> {ip} any (msg:\"{rule_type} emerging threats traffic to {ip}\"; rev:1; sid:{SID_PREFIX_TO + index};)")
 
     rule_group['RuleGroup']['RulesSource']['RulesString'] = '\n'.join(rules)
     return update_rules(rule_group)
