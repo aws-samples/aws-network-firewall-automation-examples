@@ -1,24 +1,24 @@
 Parameters:
   RuleGroupName:
     Type: String
-    Default: "SpamHausIPList"
+    Default: SpamHausIPList
   RuleGroupAction:
     Type: String
-    Description: "Used to define the action to take on a matching rule if found"
-    Default: "drop"
+    Description: Used to define the action to take on a matching rule if found
+    Default: drop
     AllowedValues:
-      - "alert"
-      - "drop"
+      - alert
+      - drop
   RuleGroupCapacity:
     Type: Number
     Default: 3000
-    Description: "Maximum number of rules this rule group can contain"
+    Description: Maximum number of rules this rule group can contain
     MinValue: 100
     MaxValue: 30000
 
 Resources:
   StatefulRulegroup:
-    Type: "AWS::NetworkFirewall::RuleGroup"
+    Type: AWS::NetworkFirewall::RuleGroup
     Properties:
       RuleGroupName: !Sub "${AWS::StackName}-${RuleGroupName}-${RuleGroupAction}"
       Type: STATEFUL
@@ -30,8 +30,8 @@ Resources:
         Used to track a list of Emerging IP Threats from
         https://www.spamhaus.org/drop/drop.txt
       Tags:
-        - Key: "ProjectName"
-          Value: "SpamHausIPFiltering"
+        - Key: ProjectName
+          Value: SpamHausIPFiltering
   LambdaExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -44,7 +44,7 @@ Resources:
                 - lambda.amazonaws.com
             Action:
               - sts:AssumeRole
-      Path: "/"
+      Path: /
       Policies:
         - PolicyName: LambdaLogs
           PolicyDocument:
@@ -52,8 +52,8 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - "logs:CreateLogStream"
-                  - "logs:PutLogEvents"
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
                 Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
         - PolicyName: NetworkFirewall
           PolicyDocument:
@@ -61,12 +61,12 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - "network-firewall:*"
+                  - network-firewall:*
                 Resource:
                   - !GetAtt StatefulRulegroup.RuleGroupArn
       Tags:
-        - Key: "ProjectName"
-          Value: "SpamHausIPFiltering"
+        - Key: ProjectName
+          Value: SpamHausIPFiltering
   LambdaLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -76,25 +76,25 @@ Resources:
   ScheduledRule:
     Type: AWS::Events::Rule
     Properties:
-      Description: "SpamHausDropDailyTrigger"
+      Description: SpamHausDropDailyTrigger
       ScheduleExpression: "cron(0 0 * * ? *)"
-      State: "ENABLED"
+      State: ENABLED
       Targets:
         - Arn:
             Fn::GetAtt:
               - "LambdaFunction"
               - "Arn"
-          Id: "TargetFunctionV1"
+          Id: TargetFunctionV1
   PermissionForEventsToInvokeLambda:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref "LambdaFunction"
-      Action: "lambda:InvokeFunction"
-      Principal: "events.amazonaws.com"
+      FunctionName: !Ref LambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
       SourceArn:
         Fn::GetAtt:
-          - "ScheduledRule"
-          - "Arn"
+          - ScheduledRule
+          - Arn
   LambdaInvoke:
     Type: AWS::CloudFormation::CustomResource
     Version: "1.0"
@@ -109,8 +109,8 @@ Resources:
       Timeout: 60
       Description: Used to fetch data from the Emerging Threats IP list and update the associated RuleGroup
       Tags:
-        - Key: "ProjectName"
-          Value: "SpamHausIPFiltering"
+        - Key: ProjectName
+          Value: SpamHausIPFiltering
       Code:
         ZipFile: !Sub |
           import json
