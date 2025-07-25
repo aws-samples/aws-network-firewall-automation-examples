@@ -1,0 +1,232 @@
+import json
+import urllib.request
+import boto3
+from datetime import datetime
+
+# CloudFormation detection - cfnresponse module only available in CFN Lambda runtime
+try:
+    import cfnresponse
+    IS_CFN_DEPLOYMENT = True
+except ImportError:
+    IS_CFN_DEPLOYMENT = False
+
+# ============================================================================
+# CONFIGURATION - Customize these values for your threat intelligence source
+# ============================================================================
+
+# REQUIRED: Customize these values for your specific threat intelligence source
+THREAT_INTEL_URL = "https://www.spamhaus.org/drop/drop_v4.json"
+RULE_GROUP_ARN = (
+    "{{RULE_GROUP_ARN}}" if IS_CFN_DEPLOYMENT 
+    else "<REPLACE-WITH-THE-ARN-OF-YOUR-RULE-GROUP>"
+)
+
+# OPTIONAL: Default values - work out of the box but can be customized
+DEFAULT_RULE_ACTION = "drop"
+DEFAULT_RULE_MESSAGE_PREFIX = "SpamHaus"
+DEFAULT_RULE_GROUP_CAPACITY = 8000
+DEFAULT_SID_PREFIX_FROM = 1000000
+DEFAULT_SID_PREFIX_TO = 1050000
+
+# Applied configuration - uses CFN parameters or defaults
+RULE_GROUP_CAPACITY = (
+    "{{RULE_GROUP_CAPACITY}}" if IS_CFN_DEPLOYMENT else DEFAULT_RULE_GROUP_CAPACITY
+)
+RULE_MESSAGE_PREFIX = (
+    "{{RULE_MESSAGE_PREFIX}}" if IS_CFN_DEPLOYMENT else DEFAULT_RULE_MESSAGE_PREFIX
+)
+SID_PREFIX_FROM = (
+    "{{SID_PREFIX_FROM}}" if IS_CFN_DEPLOYMENT else DEFAULT_SID_PREFIX_FROM
+)
+SID_PREFIX_TO = (
+    "{{SID_PREFIX_TO}}" if IS_CFN_DEPLOYMENT else DEFAULT_SID_PREFIX_TO
+)
+
+# Calculated values - each threat indicator creates 2 rules (inbound + outbound)
+MAX_RESULTS = int(RULE_GROUP_CAPACITY) // 2
+
+# Initialize AWS clients
+networkfirewall = boto3.client('network-firewall')
+
+
+def fetch_threat_intel():
+    """Fetch threat intelligence data from the configured URL."""
+    print("Fetching threat intelligence data...")
+    with urllib.request.urlopen(THREAT_INTEL_URL, timeout=30) as response:
+        raw_data = response.read().decode('utf-8')
+    
+    # Parse JSON lines format - each line is a separate JSON object
+    threat_indicators = []
+    for line in raw_data.strip().split('\n'):
+        if line.strip():
+            try:
+                entry = json.loads(line.strip())
+                cidr = entry.get('cidr')
+                if cidr:
+                    threat_indicators.append(cidr)
+            except json.JSONDecodeError:
+                continue  # Skip malformed lines
+    print(f"Fetched {len(threat_indicators)} threat indicators...")
+    return threat_indicators
+
+
+def generate_suricata_rule(rule_action, threat_indicator, direction, 
+                          message_prefix, rule_sid):
+    """Generate a single Suricata rule for the given threat indicator and direction."""
+    if direction == "from":
+        rule_template = (
+            '{rule_action} ip {threat_indicator} any -> any any '
+            '(msg:"{message_prefix}: {rule_action} traffic from {threat_indicator}"; '
+            'rev:1; sid:{rule_sid};)'
+        )
+    else:  # direction == "to"
+        rule_template = (
+            '{rule_action} ip any any -> {threat_indicator} any '
+            '(msg:"{message_prefix}: {rule_action} traffic to {threat_indicator}"; '
+            'rev:1; sid:{rule_sid};)'
+        )
+    
+    return rule_template.format(
+        rule_action=rule_action,
+        threat_indicator=threat_indicator,
+        message_prefix=message_prefix,
+        rule_sid=rule_sid
+    )
+
+
+def build_rules_string(rule_action):
+    """Build the complete Suricata rules string from threat intelligence data."""
+    threat_indicators = fetch_threat_intel()
+    
+    if not threat_indicators:
+        raise ValueError("No threat intelligence data available")
+
+    # Limit results to stay within rule capacity
+    original_indicator_count = len(threat_indicators)
+    threat_indicators = threat_indicators[:MAX_RESULTS]
+    indicators_were_truncated = original_indicator_count > MAX_RESULTS
+
+    suricata_rules = []
+    current_timestamp = datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
+    suricata_rules.append(f"# Last updated: {current_timestamp}")
+    suricata_rules.append(f"# Source: {THREAT_INTEL_URL}")
+    suricata_rules.append(
+        f"# Processing {len(threat_indicators)} of {original_indicator_count} "
+        f"threat indicators (limit: {MAX_RESULTS})"
+    )
+    if indicators_were_truncated:
+        suricata_rules.append(
+            f"# WARNING: Threat indicators truncated from "
+            f"{original_indicator_count} to {MAX_RESULTS} due to rule capacity limits"
+        )
+
+    for rule_index, threat_indicator in enumerate(threat_indicators):
+        inbound_rule = generate_suricata_rule(
+            rule_action,
+            threat_indicator,
+            "from",
+            RULE_MESSAGE_PREFIX,
+            SID_PREFIX_FROM + rule_index
+        )
+        outbound_rule = generate_suricata_rule(
+            rule_action,
+            threat_indicator,
+            "to",
+            RULE_MESSAGE_PREFIX,
+            SID_PREFIX_TO + rule_index
+        )
+        suricata_rules.append(inbound_rule)
+        suricata_rules.append(outbound_rule)
+
+    return '\n'.join(suricata_rules)
+
+
+def update_firewall_rules(firewall_rule_group, suricata_rules):
+    """Update the Network Firewall rule group with new rules."""
+    rule_group_name = firewall_rule_group["RuleGroupResponse"]["RuleGroupName"]
+    
+    print("Updating Network Firewall rules...")
+    rule_update_request = {
+        "UpdateToken": firewall_rule_group["UpdateToken"],
+        "RuleGroupArn": RULE_GROUP_ARN,
+        "RuleGroup": {
+            "RulesSource": {"RulesString": suricata_rules}
+        },
+        "Type": "STATEFUL"
+    }
+    
+    networkfirewall.update_rule_group(**rule_update_request)
+    print(f"Successfully updated '{rule_group_name}'.")
+
+
+def send_cfn_response(cfn_event, lambda_context, response_status, 
+                     response_message, status_reason):
+    """Send response to CloudFormation if running in CFN context."""
+    if IS_CFN_DEPLOYMENT:
+        cfnresponse.send(
+            cfn_event, lambda_context, response_status, 
+            {"Message": response_message}, status_reason
+        )
+
+
+def process_threat_intelligence():
+    """Main business logic - separated from Lambda/CFN concerns."""
+    # Get rule group
+    describe_request = {"Type": "STATEFUL", "RuleGroupArn": RULE_GROUP_ARN}
+    print("Searching for Network Firewall rule group...")
+    firewall_rule_group = networkfirewall.describe_rule_group(**describe_request)
+    
+    if 'RuleGroupResponse' not in firewall_rule_group:
+        raise ValueError("No matching Rule Group found for the provided ARN")
+    
+    print("Found Rule Group - building threat intelligence rules...")
+    
+    # Build and update rules
+    suricata_rules = build_rules_string(
+        "{{RULE_ACTION}}" if IS_CFN_DEPLOYMENT else DEFAULT_RULE_ACTION
+    )
+    update_firewall_rules(firewall_rule_group, suricata_rules)
+    
+    print("Network Firewall rules updated successfully")
+
+
+def lambda_handler(event, context):
+    """Clean Lambda handler with clear flow."""
+    # Handle CloudFormation delete events
+    if IS_CFN_DEPLOYMENT and event.get("RequestType") == "Delete":
+        send_cfn_response(
+            event, context, cfnresponse.SUCCESS, 
+            "Delete request processed successfully", "Delete successful"
+        )
+        return {"statusCode": 200, "body": json.dumps("Delete request processed")}
+    
+    # Main processing with clean error handling
+    try:
+        process_threat_intelligence()
+        send_cfn_response(
+            event, context, cfnresponse.SUCCESS,
+            "Successfully updated Network Firewall rules", "Update successful"
+        )
+        return {"statusCode": 200, "body": json.dumps("Function executed successfully")}
+        
+    except ValueError as e:
+        print(f"Configuration/Data error: {str(e)}")
+        send_cfn_response(
+            event, context, cfnresponse.FAILED, str(e), "Configuration error"
+        )
+        return {"statusCode": 400, "body": json.dumps(str(e))}
+        
+    except RuntimeError as e:
+        print(f"Update error: {str(e)}")
+        send_cfn_response(
+            event, context, cfnresponse.FAILED, str(e), "Update failed"
+        )
+        return {"statusCode": 500, "body": json.dumps(str(e))}
+        
+    except Exception as e:
+        print(f"Unexpected error: {str(e)}")
+        send_cfn_response(
+            event, context, cfnresponse.FAILED, 
+            f"Unexpected error: {str(e)}", "Lambda execution failed"
+        )
+        return {"statusCode": 500, "body": json.dumps(str(e))}
