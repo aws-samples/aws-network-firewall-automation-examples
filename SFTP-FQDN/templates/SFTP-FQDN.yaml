@@ -1,3 +1,5 @@
+Description: "SFTP-FQDN (uksb-eds96h908t)(tag: SFTP-FQDN)"
+
 Parameters:
   RuleGroupName:
     Type: String

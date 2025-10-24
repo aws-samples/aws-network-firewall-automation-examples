@@ -1,3 +1,5 @@
+Description: "AbuseCH.yaml (uksb-eds96h908t)(tag: anf-abuse-ch-host-file)"
+
 Parameters:
   RGName:
     Type: String

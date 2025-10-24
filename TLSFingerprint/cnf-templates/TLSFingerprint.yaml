@@ -1,3 +1,5 @@
+Description: "TLSFingerprint (uksb-eds96h908t)(tag: TLSFingerprint)"
+
 Parameters:
   SNIRuleGroupName:
     Type: String

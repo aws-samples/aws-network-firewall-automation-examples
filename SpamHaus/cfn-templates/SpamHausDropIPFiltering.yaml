@@ -1,3 +1,5 @@
+Description: "SpamHausDropIPFiltering (uksb-eds96h908t)(tag: SpamHausDropIPFiltering)"
+
 Parameters:
   RuleGroupName:
     Type: String

@@ -1,3 +1,5 @@
+Description: "EmergingThreatsIPFiltering (uksb-eds96h908t)(tag: EmergingThreatsIPFiltering)"
+
 Parameters:
   RuleGroupName:
     Type: String

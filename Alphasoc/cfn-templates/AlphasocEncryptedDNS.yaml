@@ -1,3 +1,5 @@
+Description: "AlphaSocEncryptedDNS (uksb-eds96h908t)(tag: AlphaSocEncryptedDNS)"
+
 Parameters:
   RuleGroupName:
     Type: String

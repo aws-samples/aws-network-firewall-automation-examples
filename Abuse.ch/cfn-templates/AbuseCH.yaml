@@ -1,3 +1,5 @@
+Description: "AbuseCH.yaml (uksb-eds96h908t)(tag: abuse-ch)"
+
 Parameters:
   AbuseRG1Name:
     Description: "The name of the first Rule Group created to hold the rules"

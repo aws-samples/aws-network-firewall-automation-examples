@@ -1,6 +1,7 @@
 # This templates creates the resources required to generate an allow list based on NFW logs
 
 AWSTemplateFormatVersion: "2010-09-09"
+Description: "Network Firewall Open Source Allow List Generator CloudWatch Log Source (uksb-eds96h908t)(tag: allow-list-gen-cloudwatch)"
 Parameters:
   NetworkFirewallLogGroupName:
     Type: String

@@ -1,3 +1,5 @@
+Description: "EmergingThreatsBotCC (uksb-eds96h908t)(tag: EmergingThreatsBotCC)"
+
 Parameters:
   RuleGroupName:
     Type: String

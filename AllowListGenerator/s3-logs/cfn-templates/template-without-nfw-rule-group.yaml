@@ -1,4 +1,5 @@
 AWSTemplateFormatVersion: 2010-09-09
+Description: "Network Firewall Open Source Allow List Generator S3 Log Source (uksb-eds96h908t)(tag: allow-list-gen-s3-without-nfw-rule-group)"
 Parameters:
   LogBucket:
     Type: String

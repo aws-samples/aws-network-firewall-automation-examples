@@ -1,3 +1,5 @@
+Description: "LinodeAddresses (uksb-eds96h908t)(tag: LinodeAddresses)"
+
 Parameters:
   RuleGroupName:
     Type: String

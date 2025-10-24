@@ -4,7 +4,7 @@
 # agreement between Customer and Amazon Web Services, Inc.
 
 AWSTemplateFormatVersion: 2010-09-09
-Description: Launches a nested stack that creates the decentralized deployment model-1
+Description: "Slack Integration (uksb-eds96h908t)(tag: SlackIntegration)"
 
 Metadata:
   'AWS::CloudFormation::Interface':
